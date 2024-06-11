@@ -1,0 +1,22 @@
+[project]
+name = "textchat"
+version = "0.1.2"
+authors = [
+    { name = "Matthew Blau", email = "mrb1105@gmail.com" },
+]
+dependencies = ["textual >=0.66.0", "irc >=20.4.0", "textual-autocomplete >=2.1.0b0","SQLAlchemy >=2.0.30", "aiosqlite >=0.20.0"]
+requires-python = ">=3.8"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Linux",
+]
+[tool.setuptools.package-data]
+textchat = ["*.py", "*.tcss"]
+[project.scripts]
+textchat = "textchat:ircchat"
