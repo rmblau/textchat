@@ -8,7 +8,7 @@ from ..widgets.address import ServerAddress, ServerPort
 from ..widgets.nickname import Nickname
 from ..widgets.channels import Channels
 from ..widgets.password import Password
-from ..db.db import add_channel_to_list, add_server_info
+from ..db.db import ChannelOperations
 from ..utils.channels import load_channels
 
 class SettingsScreen(Screen):
@@ -35,18 +35,11 @@ class SettingsScreen(Screen):
             nickname = self.query_one(Nickname).value
             channels = self.query_one(Channels).value
             password = self.query_one(Password).value
-            await add_server_info(server_address, server_port, nickname, password)
+            await ChannelOperations().add_server_info(server_address, server_port, nickname, password)
             existing_channnels = await load_channels()
             for channel in channels.split(","):
              if channel not in existing_channnels:
-                await add_channel_to_list(channel)
+                await ChannelOperations().add_channel_to_list(channel)
              else:
                 pass
-            self.irc_client = IRCApp(self,
-                                 server_list=[(server_address, server_port)],
-                                 nickname=nickname,
-                                 realname=nickname,
-                                 ident_password=password,
-                                 channels=channels,
-                                 )
-            self.irc_client.start_event_loop()
+

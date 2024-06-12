@@ -1,21 +1,22 @@
-import asyncio
 from concurrent.futures import ThreadPoolExecutor
-import sys
-import threading
-from textual import work
 from textual.widgets import Label, TabbedContent, TabPane
 from irc.client import SimpleIRCClient
 from datetime import datetime
 import time
 from .utils.channels import load_channels
-from .db.db import add_channel_to_list
-
-#channels = load_channels()
-
-  
+from .db.db import ChannelOperations
+from ib3.connection import SSL
+from ib3.auth import SASL
 
 class IRCApp(SimpleIRCClient):
-    def __init__(self,app, server_list, nickname, realname, ident_password=None, channels=load_channels()):
+    def __init__(self,
+                 app, 
+                 server_list, 
+                 nickname, 
+                 realname, 
+                 ident_password=None, 
+                 channels=load_channels()
+                 ):
         super().__init__()
         self.app = app
         self.server_list = server_list
@@ -33,27 +34,27 @@ class IRCApp(SimpleIRCClient):
         print("actually connecting")
 
     def _irc_event_loop(self):
-        self.start() 
-        print("really connecting!!!!")
+        try:
+            self.start() 
+        except KeyboardInterrupt:
+            self.stop()
     def stop(self):
         self._thread_pool.shutdown(wait=False)
 
     
     def start(self):
         self.connect(
-                    self.server_name,
-                    self.server_port,
-                    self.nickname,
-                    self.ident_password,
-                    self.realname,
+                    server=self.server_name,
+                    port=self.server_port,
+                    nickname=self.nickname,
+                    password=self.ident_password,
+                    username=self.realname,
                    )
         super().start()
     
     def on_welcome(self, connection, event):
-        #self.connection.privmsg("nickserv", f'identify {self.password}')
         for channel in self.channels:
             connection.join(channel)
-            #await add_channel_to_list(channel)
         time.sleep(7)
         self.app.notify("Connected!")
 
@@ -65,7 +66,8 @@ class IRCApp(SimpleIRCClient):
             if not channel in self.channels:
                 self.connection.join(channel) 
                 self.channels.append(channel)
-                await add_channel_to_list(channel)
+                channel_ops = ChannelOperations()
+                await channel_ops.add_channel_to_list(channel)
                 self.app.query_one(TabbedContent).add_pane(TabPane(channel,
                                                         Label(),
                                                        name=channel, 
@@ -75,12 +77,14 @@ class IRCApp(SimpleIRCClient):
             return True
         return False 
     
-    def _intercept_part(self, message):
+    async def _intercept_part(self, message):
         self.tab = self.app.query_one(TabbedContent).active_pane 
         if message.startswith("/part"):
             channel = message.split()[1]
             self.connection.part(channel) 
             self.channels.remove(channel)
+            channel_ops = ChannelOperations()
+            await channel_ops.delete_channel(channel)
             self.app.query_one(TabbedContent).remove_pane(f'{channel.replace("#", "").lower()}')
             return True
         return False 

@@ -1,5 +1,5 @@
-from ..db.db import get_channels
+from ..db.db import ChannelOperations
 async def load_channels():
-    channels = await get_channels()
+    channels = await ChannelOperations().get_channels()
 
     return [name.channel_name for name in channels]

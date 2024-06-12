@@ -1,10 +1,10 @@
+import asyncio
 from datetime import datetime
 from pathlib import Path
 
 from textchat.widgets.input import ChatInput
-
 from textchat.screens.quit import QuitScreen
-from textchat.db.db import get_password, get_port, get_server_address, get_username
+from textchat.db.db import ChannelOperations
 from textual import work
 from textual import on
 from textual.app import App
@@ -17,7 +17,6 @@ from textchat.screens.irc import IRCScreen
 from textchat.screens.settings import SettingsScreen
 from textchat.db.base import create_table
 from textchat.utils.channels import load_channels
-
 
 class TextChat(App):
     def __init__(self):
@@ -36,10 +35,11 @@ class TextChat(App):
         await create_table()
         self.channel_list = None
         self.users = set()
-        self.username = await get_username()
-        self.port = await get_port()
-        self.server_address = await get_server_address()
-        self.password = await get_password()
+        self.channel_ops = ChannelOperations()
+        self.username = await self.channel_ops.get_username()
+        self.port = await self.channel_ops.get_port()
+        self.server_address = await self.channel_ops.get_server_address()
+        self.password = await self.channel_ops.get_password()
 
         existing_channels = await load_channels()
         if not existing_channels:
@@ -79,6 +79,8 @@ class TextChat(App):
           
     @on(ChatInput.Submitted) 
     async def send_message(self, event) -> None:
+        join = await self.irc_client._intercept_join(event.value)
+        part = await self.irc_client._intercept_part(event.value)
         try:
              
             input = self.query_one(ChatInput)
@@ -88,15 +90,19 @@ class TextChat(App):
              pass
         else:
             input.value = "" 
-            self.tab = self.query_one(TabbedContent).active_pane
-            now = datetime.now()
-            if now.minute <= 9 and not await self.irc_client._intercept_join(event.value):
-                    self.irc_client.connection.privmsg(self.tab.name, event.value)
-                    self.tab.mount(Label(f'{now.hour}:0{now.minute} <{self.irc_client.nickname}> {event.value}'))
-            elif not await self.irc_client._intercept_join(event.value):
-                self.irc_client.connection.privmsg(self.tab.name, event.value)
-                self.tab.mount(Label(f'{now.hour}:{now.minute} <{self.irc_client.nickname}> {event.value}'))
+            try:
+                self.tab = self.query_one(TabbedContent).active_pane
+                now = datetime.now()
+                if now.minute <= 9 and not await self.irc_client._intercept_join(event.value) and not await self.irc_client._intercept_part(event.value):
+                        self.irc_client.connection.privmsg(self.tab.name, event.value)
+                        self.tab.mount(Label(f'{now.hour}:0{now.minute} <{self.irc_client.nickname}> {event.value}'))
+                elif now.minute > 9 and not join and not part:
+                    self.tab.mount(Label(f'{now.hour}:{now.minute} <{self.irc_client.nickname}> {event.value}'))
 
+            except NoMatches:
+                pass
+           
+                 
     def get_channel_list(self):
         if self.app.channel_list is None:
             return None
