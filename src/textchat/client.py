@@ -1,12 +1,13 @@
 from concurrent.futures import ThreadPoolExecutor
 from textual.widgets import Label, TabbedContent, TabPane
 from irc.client import SimpleIRCClient
+import irc
 from datetime import datetime
 import time
+import ssl
+import functools
 from .utils.channels import load_channels
 from .db.db import ChannelOperations
-from ib3.connection import SSL
-from ib3.auth import SASL
 
 class IRCApp(SimpleIRCClient):
     def __init__(self,
@@ -15,18 +16,21 @@ class IRCApp(SimpleIRCClient):
                  nickname, 
                  realname, 
                  ident_password=None, 
-                 channels=load_channels()
-                 ):
+                 channels=load_channels(),
+                 sasl_login=None
+    ):
         super().__init__()
         self.app = app
         self.server_list = server_list
         self.server_name = server_list[0][0]
+    
         self.server_port = server_list[0][1]
         self.nickname = nickname
         self.realname= realname
         self.ident_password = ident_password
         self.channels = channels
         self._thread_pool = ThreadPoolExecutor(max_workers=1)
+        self.sasl_login = sasl_login
 
     def start_event_loop(self):
         print("connecting..")
@@ -38,18 +42,42 @@ class IRCApp(SimpleIRCClient):
             self.start() 
         except KeyboardInterrupt:
             self.stop()
+
+
     def stop(self):
-        self._thread_pool.shutdown(wait=False)
+        self._thread_pool.shutdown(wait=False, cancel_futures=True)
+        self.quit()
 
     
     def start(self):
-        self.connect(
+        if self.sasl_login and self.server_port == 6697:
+            context = ssl.create_default_context()
+            wrapper = functools.partial(context.wrap_socket, server_hostname=self.server_name)
+
+            self.connect(
                     server=self.server_name,
                     port=self.server_port,
                     nickname=self.nickname,
                     password=self.ident_password,
-                    username=self.realname,
-                   )
+                    sasl_login=self.nickname,
+                    connect_factory=irc.connection.Factory(wrapper=wrapper)
+                )
+        elif self.sasl_login:
+            self.connect(
+                    server=self.server_name,
+                    port=self.server_port,
+                    nickname=self.nickname,
+                    password=self.ident_password,
+                    sasl_login=self.nickname
+            )
+        else:
+             self.connect(
+                    server=self.server_name,
+                    port=self.server_port,
+                    nickname=self.nickname,
+                    password=self.ident_password
+             )
+            
         super().start()
     
     def on_welcome(self, connection, event):
@@ -90,7 +118,6 @@ class IRCApp(SimpleIRCClient):
         return False 
     
     def on_pubmsg(self, connection, event):
-        print(event)
         sender = event.source.nick
         message = event.arguments[0]
         channel = event.target
@@ -122,9 +149,12 @@ class IRCApp(SimpleIRCClient):
             self.app.handle_irc_message(f'{now.hour}:{now.minute}', channel,  f'{sender}', message, classes)
 
     def on_namreply(self, connection, event):
+        self.user_list = set()
         channel = event.arguments[1]
         user_list = event.arguments[2].split()
-        self.app.add_to_tree(channel, user_list)
+        for user in user_list:
+            self.user_list.add(user)
+        self.app.add_to_tree(channel, self.user_list)
 
     def on_join(self, connection, event):
         sender = event.source.nick
@@ -139,8 +169,17 @@ class IRCApp(SimpleIRCClient):
             self.app.handle_irc_message(f'{now.hour}:0{now.minute}', channel,  f'{sender}', message, classes)
         elif self.nickname != sender:
             self.app.handle_irc_message(f'{now.hour}:{now.minute}', channel,  f'{sender}', message, classes)
-    
+        try:
+            if sender not in self.user_list:
+                self.app.add_to_tree(channel, self.user_list)
+        except:
+            pass
+
+    def on_part(self, connection, event):
+        pass
+        #self.app.remove_from_tree()
+
     def on_disconnect(self):
-        self._stop_event.set()
+        self.stop()
 
 

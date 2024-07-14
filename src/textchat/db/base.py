@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import Boolean, Column, Integer, String
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -33,12 +33,14 @@ class ServerInfo(Base):
     port = Column(Integer, unique=False)
     nickname = Column(String, unique=False)
     password = Column(String, unique=False)
+    sasl_login = Column(Boolean, unique=False)
 
-    def __init__(self, server_address, port, nickname, password):
+    def __init__(self, server_address, port, nickname, password, sasl_login):
         self.server_address = server_address
         self.port = port
         self.nickname = nickname
         self.password = password
+        self.sasl_login = sasl_login
 
 
 async def create_table():

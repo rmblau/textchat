@@ -22,9 +22,9 @@ class ChannelOperations:
             await session.commit()
         return stmt
 
-    async def add_server_info(self,server_address, port, nickname, password):
+    async def add_server_info(self,server_address, port, nickname, password, sasl_login):
         async with Session() as session:
-            server_info = ServerInfo(server_address, port, nickname, password)
+            server_info = ServerInfo(server_address, port, nickname, password, sasl_login)
             session.add(server_info)
             await session.commit()
         return server_info
@@ -52,3 +52,10 @@ class ChannelOperations:
             server_address = await session.execute(select(ServerInfo.server_address))
             await session.commit()
             return server_address.scalars().first()
+        
+    async def get_sasl(self):
+        async with Session() as session:
+            sasl_login = await session.execute(select(ServerInfo.sasl_login))
+            await session.commit()
+        return sasl_login.scalars().first()
+    

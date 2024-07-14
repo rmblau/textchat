@@ -1,9 +1,9 @@
-from textchat.client import IRCApp
 from textchat.db.base import create_table
 from textual.app import ComposeResult
 from textual.screen import Screen
-from textual.widgets import Input, Footer, Button
+from textual.widgets import Footer, Button, Checkbox
 from textual.containers import Vertical
+
 from ..widgets.address import ServerAddress, ServerPort
 from ..widgets.nickname import Nickname
 from ..widgets.channels import Channels
@@ -20,6 +20,7 @@ class SettingsScreen(Screen):
             Nickname(placeholder="nickname"),
             Channels(placeholder="channels to join (seperate by comma)"),
             Password(placeholder="password", password=True),
+            Checkbox("SASL", False),
             Button(label="Save", id="save"),
             classes="column"
         )
@@ -35,11 +36,13 @@ class SettingsScreen(Screen):
             nickname = self.query_one(Nickname).value
             channels = self.query_one(Channels).value
             password = self.query_one(Password).value
-            await ChannelOperations().add_server_info(server_address, server_port, nickname, password)
+            sasl_login = self.query_one(Checkbox).value
+            await ChannelOperations().add_server_info(server_address, server_port, nickname, password, sasl_login)
             existing_channnels = await load_channels()
+ 
             for channel in channels.split(","):
-             if channel not in existing_channnels:
-                await ChannelOperations().add_channel_to_list(channel)
-             else:
-                pass
-
+                if channel not in existing_channnels:
+                    await ChannelOperations().add_channel_to_list(channel)
+                else:
+                    pass
+            

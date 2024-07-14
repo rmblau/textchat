@@ -1,7 +1,8 @@
 #chat-input {
     dock: bottom;
-    width: 187;
+    width: 121;
     margin: 1;
+
     }
 Dropdown {
     max-width: 32
