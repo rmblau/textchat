@@ -1,10 +1,10 @@
 [project]
 name = "textchat"
-version = "0.1.6"
+version = "0.1.8"
 authors = [
     { name = "Matthew Blau", email = "mrb1105@gmail.com" },
 ]
-dependencies = ["textual >=0.66.0", "irc >=20.4.3", "textual-autocomplete >=2.1.0b0","SQLAlchemy >=2.0.30", "aiosqlite >=0.20.0"]
+dependencies = ["textual >=0.76.0", "irc >=20.4.3", "textual-autocomplete >=2.1.0b0","SQLAlchemy >=2.0.30", "aiosqlite >=0.20.0"]
 requires-python = ">=3.8"
 classifiers = [
     "Programming Language :: Python :: 3",

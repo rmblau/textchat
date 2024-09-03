@@ -1,11 +1,12 @@
 from concurrent.futures import ThreadPoolExecutor
-from textual.widgets import Label, TabbedContent, TabPane
+from textual.widgets import Label, TabbedContent, TabPane, Tree
 from irc.client import SimpleIRCClient
 import irc
 from datetime import datetime
 import time
 import ssl
 import functools
+
 from .utils.channels import load_channels
 from .db.db import ChannelOperations
 
@@ -31,11 +32,11 @@ class IRCApp(SimpleIRCClient):
         self.channels = channels
         self._thread_pool = ThreadPoolExecutor(max_workers=1)
         self.sasl_login = sasl_login
+        self.user_list = set()
+        self.user_info = None
 
     def start_event_loop(self):
-        print("connecting..")
         self._thread_pool.submit(self._irc_event_loop)
-        print("actually connecting")
 
     def _irc_event_loop(self):
         try:
@@ -100,11 +101,28 @@ class IRCApp(SimpleIRCClient):
                                                         Label(),
                                                        name=channel, 
                                                        id=f'{channel.replace("#", "").lower()}'))
+           
             else:
                 self.app.notify(f"Already in {channel}!")
             return True
-        return False 
+        return False
     
+    async def _intercept_whois(self, message):
+        self.tab = self.app.query_one(TabbedContent).active_pane 
+        if message.startswith("/whois"):
+            user = message.split()[1]
+            self.user_info = self.app.whois(user)
+            print(f'{self.user_info=}')
+            return True
+        return False
+    
+    def on_whois(self, connection, event):
+        print(f'{event.arguments[1]=}')
+
+    def send_private_message(self, target, message):
+        self.connection.privmsg(target, message)
+
+      
     async def _intercept_part(self, message):
         self.tab = self.app.query_one(TabbedContent).active_pane 
         if message.startswith("/part"):
@@ -114,6 +132,7 @@ class IRCApp(SimpleIRCClient):
             channel_ops = ChannelOperations()
             await channel_ops.delete_channel(channel)
             self.app.query_one(TabbedContent).remove_pane(f'{channel.replace("#", "").lower()}')
+            self.app.remove_from_tree(channel)
             return True
         return False 
     
@@ -122,6 +141,7 @@ class IRCApp(SimpleIRCClient):
         message = event.arguments[0]
         channel = event.target
         now = datetime.now()
+        user = connection.whois(sender)
         if now.minute <= 9:
             self.app.handle_irc_message(f'{now.hour}:0{now.minute}', channel,  sender, message, classes=None)
         else:
@@ -130,6 +150,7 @@ class IRCApp(SimpleIRCClient):
     def on_privmsg(self, connection, event):
         message = event.arguments[0]
         user = event.source.nick
+        print(f'{user=}')
         now = datetime.now()
         if now.minute <= 9:
             self.app.handle_private_message(f'{now.hour}:0{now.minute}',  user, message, classes=None)
@@ -148,8 +169,8 @@ class IRCApp(SimpleIRCClient):
         else:
             self.app.handle_irc_message(f'{now.hour}:{now.minute}', channel,  f'{sender}', message, classes)
 
+
     def on_namreply(self, connection, event):
-        self.user_list = set()
         channel = event.arguments[1]
         user_list = event.arguments[2].split()
         for user in user_list:
@@ -169,15 +190,9 @@ class IRCApp(SimpleIRCClient):
             self.app.handle_irc_message(f'{now.hour}:0{now.minute}', channel,  f'{sender}', message, classes)
         elif self.nickname != sender:
             self.app.handle_irc_message(f'{now.hour}:{now.minute}', channel,  f'{sender}', message, classes)
-        try:
-            if sender not in self.user_list:
-                self.app.add_to_tree(channel, self.user_list)
-        except:
-            pass
+        
 
-    def on_part(self, connection, event):
-        pass
-        #self.app.remove_from_tree()
+    
 
     def on_disconnect(self):
         self.stop()
