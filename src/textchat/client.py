@@ -1,161 +1,234 @@
-from concurrent.futures import ThreadPoolExecutor
-from textual.widgets import Label, TabbedContent, TabPane, Tree
-from irc.client import SimpleIRCClient
-import irc
-from datetime import datetime
-import time
-import ssl
 import functools
+import ssl
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
-from .utils.channels import load_channels
+import irc
+from irc.client import SimpleIRCClient
+from textual.widgets import TabbedContent
+
 from .db.db import ChannelOperations
 
+
 class IRCApp(SimpleIRCClient):
-    def __init__(self,
-                 app, 
-                 server_list, 
-                 nickname, 
-                 realname, 
-                 ident_password=None, 
-                 channels=load_channels(),
-                 sasl_login=None
+    def __init__(
+        self,
+        app,
+        server_list,
+        nickname,
+        realname,
+        ident_password=None,
+        znc_username=None,
+        znc_network=None,
+        use_tls=False,
+        channels=None,
+        sasl_login=None,
     ):
         super().__init__()
+
         self.app = app
         self.server_list = server_list
         self.server_name = server_list[0][0]
-    
-        self.server_port = server_list[0][1]
+        self.server_port = int(server_list[0][1])
+
         self.nickname = nickname
-        self.realname= realname
+        self.realname = realname
         self.ident_password = ident_password
-        self.channels = channels
-        self._thread_pool = ThreadPoolExecutor(max_workers=1)
+
+        # Optional ZNC connection settings.
+        self.znc_username = znc_username
+        self.znc_network = znc_network
+        self.use_tls = use_tls
+
+        self.channels = channels if channels is not None else []
         self.sasl_login = sasl_login
+
+        self._thread_pool = ThreadPoolExecutor(max_workers=1)
+        self._running = False
+        self._stopping = False
         self.user_list = set()
         self.user_info = None
 
     def start_event_loop(self):
+        if self._running:
+            return
+
+        self._running = True
+        self._stopping = False
         self._thread_pool.submit(self._irc_event_loop)
 
     def _irc_event_loop(self):
         try:
-            self.start() 
-        except KeyboardInterrupt:
-            self.stop()
-
+            self.start()
+        finally:
+            self._running = False
 
     def stop(self):
-        self._thread_pool.shutdown(wait=False, cancel_futures=True)
-        self.quit()
+        """Disconnect the IRC socket and let the reactor thread exit."""
+        if self._stopping:
+            return
 
-    
+        self._stopping = True
+        self._running = False
+
+        try:
+            if self.connection.is_connected():
+                self.connection.disconnect("Textchat exiting")
+        finally:
+            self._thread_pool.shutdown(wait=False, cancel_futures=True)
+
     def start(self):
-        if self.sasl_login and self.server_port == 6697:
-            context = ssl.create_default_context()
-            wrapper = functools.partial(context.wrap_socket, server_hostname=self.server_name)
+        # Normal IRC: username is the nickname.
+        # ZNC: username becomes "znc-user/network".
+        username = self.znc_username or self.nickname
+        if self.znc_username and self.znc_network:
+            username = f"{self.znc_username}/{self.znc_network}"
 
-            self.connect(
-                    server=self.server_name,
-                    port=self.server_port,
-                    nickname=self.nickname,
-                    password=self.ident_password,
-                    sasl_login=self.nickname,
-                    connect_factory=irc.connection.Factory(wrapper=wrapper)
+        options = {
+            "server": self.server_name,
+            "port": self.server_port,
+            "nickname": self.nickname,
+            "username": username,
+            "ircname": self.realname,
+            "password": self.ident_password,
+        }
+
+        # TLS is independent of SASL and port number.
+        if self.use_tls:
+            context = ssl.create_default_context()
+            options["connect_factory"] = irc.connection.Factory(
+                wrapper=functools.partial(
+                    context.wrap_socket,
+                    server_hostname=self.server_name,
                 )
-        elif self.sasl_login:
-            self.connect(
-                    server=self.server_name,
-                    port=self.server_port,
-                    nickname=self.nickname,
-                    password=self.ident_password,
-                    sasl_login=self.nickname
             )
-        else:
-             self.connect(
-                    server=self.server_name,
-                    port=self.server_port,
-                    nickname=self.nickname,
-                    password=self.ident_password
-             )
-            
-        super().start()
-    
+
+        # Leave this false for ordinary ZNC PASS authentication.
+        # When enabled, python-irc uses the password for SASL instead of PASS.
+        if self.sasl_login:
+            options["sasl_login"] = username
+
+        self.connect(**options)
+        while self._running:
+            self.reactor.process_once(timeout=0.2)
+
     def on_welcome(self, connection, event):
+        candidates = (
+            getattr(event, "target", None),
+            connection.get_nickname(),
+        )
+        for candidate in candidates:
+            if candidate and not any(char.isspace() for char in candidate):
+                self.nickname = candidate
+                break
+        else:
+            welcome = connection.get_nickname() or ""
+            if welcome.startswith("Welcome to "):
+                self.nickname = welcome.rsplit(maxsplit=1)[-1]
+
         for channel in self.channels:
             connection.join(channel)
+
         time.sleep(7)
         self.app.notify("Connected!")
 
-    
     async def _intercept_join(self, message):
-        self.tab = self.app.query_one(TabbedContent).active_pane 
         if message.startswith("/join"):
             channel = message.split()[1]
-            if not channel in self.channels:
-                self.connection.join(channel) 
+
+            if channel not in self.channels:
+                self.connection.join(channel)
                 self.channels.append(channel)
+
                 channel_ops = ChannelOperations()
                 await channel_ops.add_channel_to_list(channel)
-                self.app.query_one(TabbedContent).add_pane(TabPane(channel,
-                                                        Label(),
-                                                       name=channel, 
-                                                       id=f'{channel.replace("#", "").lower()}'))
-           
+                await self.app._ensure_channel_tab(channel)
             else:
                 self.app.notify(f"Already in {channel}!")
+
             return True
+
         return False
-    
+
     async def _intercept_whois(self, message):
-        self.tab = self.app.query_one(TabbedContent).active_pane 
+        self.tab = self.app.query_one(TabbedContent).active_pane
+
         if message.startswith("/whois"):
             user = message.split()[1]
             self.user_info = self.app.whois(user)
-            print(f'{self.user_info=}')
+            print(f"{self.user_info=}")
             return True
+
         return False
-    
+
     def on_whois(self, connection, event):
-        print(f'{event.arguments[1]=}')
+        print(f"{event.arguments[1]=}")
 
     def send_private_message(self, target, message):
         self.connection.privmsg(target, message)
 
-      
     async def _intercept_part(self, message):
-        self.tab = self.app.query_one(TabbedContent).active_pane 
         if message.startswith("/part"):
             channel = message.split()[1]
-            self.connection.part(channel) 
+            self.connection.part(channel)
             self.channels.remove(channel)
+
             channel_ops = ChannelOperations()
             await channel_ops.delete_channel(channel)
-            self.app.query_one(TabbedContent).remove_pane(f'{channel.replace("#", "").lower()}')
+
+            await self.app.get_screen("irc").query_one(TabbedContent).remove_pane(
+                channel.replace("#", "").lower()
+            )
             self.app.remove_from_tree(channel)
             return True
-        return False 
-    
+
+        return False
+
     def on_pubmsg(self, connection, event):
         sender = event.source.nick
         message = event.arguments[0]
         channel = event.target
         now = datetime.now()
-        user = connection.whois(sender)
+
+        connection.whois(sender)
+
         if now.minute <= 9:
-            self.app.handle_irc_message(f'{now.hour}:0{now.minute}', channel,  sender, message, classes=None)
+            self.app.handle_irc_message(
+                f"{now.hour}:0{now.minute}",
+                channel,
+                sender,
+                message,
+                classes=None,
+            )
         else:
-            self.app.handle_irc_message(f'{now.hour}:{now.minute}', channel,  f'{sender}', message, classes=None)
+            self.app.handle_irc_message(
+                f"{now.hour}:{now.minute}",
+                channel,
+                sender,
+                message,
+                classes=None,
+            )
 
     def on_privmsg(self, connection, event):
         message = event.arguments[0]
         user = event.source.nick
-        print(f'{user=}')
         now = datetime.now()
+
         if now.minute <= 9:
-            self.app.handle_private_message(f'{now.hour}:0{now.minute}',  user, message, classes=None)
+            self.app.handle_private_message(
+                f"{now.hour}:0{now.minute}",
+                user,
+                message,
+                classes=None,
+            )
         else:
-            self.app.handle_private_message(f'{now.hour}:{now.minute}', user, message, classes=None)
+            self.app.handle_private_message(
+                f"{now.hour}:{now.minute}",
+                user,
+                message,
+                classes=None,
+            )
 
     def on_ctcp(self, connection, event):
         sender = event.source.nick
@@ -163,38 +236,65 @@ class IRCApp(SimpleIRCClient):
         channel = event.target
         now = datetime.now()
         classes = "italics"
-        if now.minute  <= 9:
 
-            self.app.handle_irc_message(f'{now.hour}:0{now.minute}', channel,  f'{sender}', message, classes)
+        if now.minute <= 9:
+            self.app.handle_irc_message(
+                f"{now.hour}:0{now.minute}",
+                channel,
+                sender,
+                message,
+                classes,
+            )
         else:
-            self.app.handle_irc_message(f'{now.hour}:{now.minute}', channel,  f'{sender}', message, classes)
-
+            self.app.handle_irc_message(
+                f"{now.hour}:{now.minute}",
+                channel,
+                sender,
+                message,
+                classes,
+            )
 
     def on_namreply(self, connection, event):
         channel = event.arguments[1]
         user_list = event.arguments[2].split()
+
+        self.app.ensure_channel_tab(channel)
+
         for user in user_list:
             self.user_list.add(user)
-        self.app.add_to_tree(channel, self.user_list)
+
+        self.app.update_channel_tree(channel, self.user_list.copy())
 
     def on_join(self, connection, event):
         sender = event.source.nick
+
         try:
             message = event.arguments[0]
         except IndexError:
             message = "has joined"
+
         channel = event.target
         now = datetime.now()
         classes = "italics"
-        if now.minute  <= 9 and self.nickname != sender:
-            self.app.handle_irc_message(f'{now.hour}:0{now.minute}', channel,  f'{sender}', message, classes)
-        elif self.nickname != sender:
-            self.app.handle_irc_message(f'{now.hour}:{now.minute}', channel,  f'{sender}', message, classes)
-        
 
-    
+        self.app.ensure_channel_tab(channel)
+
+        if now.minute <= 9 and self.nickname != sender:
+            self.app.handle_irc_message(
+                f"{now.hour}:0{now.minute}",
+                channel,
+                sender,
+                message,
+                classes,
+            )
+        elif self.nickname != sender:
+            self.app.handle_irc_message(
+                f"{now.hour}:{now.minute}",
+                channel,
+                sender,
+                message,
+                classes,
+            )
 
     def on_disconnect(self):
         self.stop()
-
-

@@ -1,242 +1,357 @@
-import asyncio
+import re
 from datetime import datetime
 from pathlib import Path
-import time
-
-from textchat.widgets.channeltree import ChannelTree
-from textchat.widgets.input import ChatInput
-from textchat.screens.quit import QuitScreen
-from textchat.db.db import ChannelOperations
-from textual import work
-from textual import on
-from textual.app import App
-from textual.widgets import Label, TabbedContent, TabPane,Tree
-from textual.worker import get_current_worker
-from textual.css.query import NoMatches
 
 from textchat.client import IRCApp
-from textchat.screens.irc import IRCScreen
-from textchat.screens.settings import SettingsScreen
 from textchat.db.base import create_table
+from textchat.db.db import ChannelOperations
+from textchat.screens.irc import IRCScreen
+from textchat.screens.quit import QuitScreen
+from textchat.screens.settings import SettingsScreen
 from textchat.utils.channels import load_channels
+from textchat.widgets.channeltree import ChannelTree
+from textchat.widgets.input import ChatInput
+from textual import on
+from textual import work
+from textual.app import App
+from textual.css.query import NoMatches
+from textual.widgets import Label
+from textual.widgets import TabbedContent
+from textual.widgets import TabPane
+from textual.worker import get_current_worker
+
 
 class TextChat(App):
-    def __init__(self):
-        super().__init__()
-    CSS_PATH = Path('irc.tcss')
-    SCREENS = {"irc": IRCScreen(), "settings":SettingsScreen() }
-    BINDINGS = [("ctrl+h", "return_home", "Home"),
-                ("ctrl+s", "open_settings", "Settings"),
-                ("ctrl+q", "request_quit", "Quit"), 
-                ("ctrl+d", "toggle_dark", "Toggle dark mode")
-                ]
- 
-    MODES = {
-         "irc" : IRCScreen,
-         "settings": SettingsScreen,
-         "quit": QuitScreen
+    CSS_PATH = Path("irc.tcss")
+
+    SCREENS = {
+        "irc": IRCScreen,
+        "settings": SettingsScreen,
     }
 
+    BINDINGS = [
+        ("ctrl+h", "return_home", "Home"),
+        ("ctrl+s", "open_settings", "Settings"),
+        ("ctrl+q", "request_quit", "Quit"),
+        ("ctrl+d", "toggle_dark", "Toggle dark mode"),
+    ]
+
+    MODES = {
+        "irc": IRCScreen,
+        "settings": SettingsScreen,
+        "quit": QuitScreen,
+    }
 
     async def on_mount(self) -> None:
         await create_table()
+
         self.channel_list = None
         self.users = set()
         self.node_list = {}
         self.action_list = ["/join", "/part", "/msg", "/whois"]
         self.channel_ops = ChannelOperations()
-        self.username = await self.channel_ops.get_username()
-        self.port = await self.channel_ops.get_port()
-        self.server_address = await self.channel_ops.get_server_address()
-        self.password = await self.channel_ops.get_password()
-        self.sasl_login = await self.channel_ops.get_sasl()
-        self.irc_screen = self.SCREENS['irc']
+        self.irc_screen = self.get_screen("irc", IRCScreen)
 
+        server = await self.channel_ops.get_server_info()
         existing_channels = await load_channels()
-        if not existing_channels:
-             self.app.switch_mode('settings')
-        else:
-            self.app.push_screen('irc')
-            self.irc_client = IRCApp(self,
-                                 server_list=[(self.server_address, self.port)],
-                                 nickname=self.username,
-                                 realname=self.username,
-                                 ident_password=self.password,
-                                 channels=existing_channels,
-                                 sasl_login=self.sasl_login
-                                 )
 
-            self.irc_client.start_event_loop()
+        if server is None:
+            self.switch_mode("settings")
+            return
+
+        await self.push_screen("irc")
+        for channel in existing_channels:
+            await self._ensure_channel_tab(channel)
+
+        self.irc_client = self._make_irc_client(server, existing_channels)
+        self.irc_client.start_event_loop()
+
+    def _make_irc_client(self, server, channels):
+        return IRCApp(
+            self,
+            server_list=[(server.server_address, server.port)],
+            nickname=server.nickname,
+            realname=server.nickname,
+            ident_password=server.password,
+            znc_username=server.znc_username,
+            znc_network=server.znc_network,
+            use_tls=server.use_tls,
+            channels=channels,
+            sasl_login=server.sasl_login,
+        )
+
+    @staticmethod
+    def _channel_pane_id(channel):
+        return channel.replace("#", "").lower()
+
+    async def _ensure_channel_tab(self, channel):
+        """Create a tab when local settings or ZNC expose a channel."""
+        channel = channel.strip()
+        if not channel:
+            return
+
+        tabbed_content = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
+        pane_id = self._channel_pane_id(channel)
+
+        try:
+            tabbed_content.get_pane(pane_id)
+        except Exception:
+            await tabbed_content.add_pane(
+                TabPane(channel, Label(), name=channel, id=pane_id)
+            )
+
+    @work(group="irc-tabs", exit_on_error=False)
+    async def ensure_channel_tab(self, channel):
+        await self._ensure_channel_tab(channel)
+
+    @work(group="irc-tree", exit_on_error=False)
+    async def update_channel_tree(self, channel, user_list):
+        await self._ensure_channel_tab(channel)
+        self.add_to_tree(channel, user_list)
 
     def action_toggle_dark(self) -> None:
-        """An action to toggle dark mode."""
         self.dark = not self.dark
 
-    def action_request_quit(self) -> None:
+    def complete_nickname(self, chat_input):
+        """Replace the word before the cursor with a known IRC nickname."""
+        before_cursor = chat_input.value[: chat_input.cursor_position]
+        match = re.search(r"(\S+)$", before_cursor)
+        if match is None or match.group(1).startswith("/"):
+            return False
 
+        prefix = match.group(1).lstrip("@+%&~")
+        if not prefix:
+            return False
+
+        candidates = sorted(
+            {
+                user.lstrip("@+%&~")
+                for user in self.users
+                if user.lstrip("@+%&~").casefold().startswith(prefix.casefold())
+            },
+            key=str.casefold,
+        )
+        if not candidates:
+            return False
+
+        nickname = candidates[0]
+        suffix = ": " if match.start() == 0 else ""
+        replacement = nickname + suffix
+        chat_input.value = (
+            before_cursor[: match.start()]
+            + replacement
+            + chat_input.value[chat_input.cursor_position :]
+        )
+        chat_input.cursor_position = match.start() + len(replacement)
+        return True
+
+    def action_request_quit(self) -> None:
         def check_quit(quit: bool) -> None:
             if quit:
                 try:
-                    self.app.irc_client.stop()
+                    self.irc_client.stop()
                 except AttributeError:
                     pass
 
-                self.app.exit()
-                
-        self.push_screen(QuitScreen(), check_quit) 
-    
+                self.exit()
+
+        self.push_screen(QuitScreen(), check_quit)
+
     def action_open_settings(self) -> None:
-        self.push_screen(SettingsScreen()) 
+        self.push_screen(SettingsScreen())
 
+    async def action_return_home(self) -> None:
+        channels = await load_channels()
+        server = await self.channel_ops.get_server_info()
 
-    async def action_return_home(self) -> None: 
-        channels = await load_channels()   
-        self.username = await self.channel_ops.get_username()
-        self.port = await self.channel_ops.get_port()
-        self.server_address = await self.channel_ops.get_server_address()
-        self.password = await self.channel_ops.get_password()
-        self.sasl_login = await self.channel_ops.get_sasl()
+        if server is None:
+            self.switch_mode("settings")
+            return
+
+        await self.push_screen("irc")
         for channel in channels:
-            try:
-                self.SCREENS['irc'].query_one(TabbedContent).add_pane(TabPane(channel,
-                                                        Label(),
-                                                       name=channel, 
-                                                       id=f'{channel.replace("#", "").lower()}'))
-            except:
-                self.push_screen(self.SCREENS['irc'])
-        try:
-            self.irc_client = IRCApp(self,
-                                 server_list=[(self.server_address, self.port)],
-                                 nickname=self.username,
-                                 realname=self.username,
-                                 ident_password=self.password,
-                                 channels=channels,
-                                 sasl_login=self.sasl_login
-                                 )
+            await self._ensure_channel_tab(channel)
 
+        try:
+            self.irc_client = self._make_irc_client(server, channels)
             self.irc_client.start_event_loop()
-        except Exception as e:
-            print(e)
+        except Exception as error:
+            print(error)
 
     @on(ChatInput.Submitted)
     async def send_message(self, event) -> None:
         try:
-             
-            input = self.query_one(ChatInput)
+            chat_input = self.get_screen("irc", IRCScreen).query_one(ChatInput)
         except NoMatches:
-             input = False
-        if not input:
-             pass
-        else:
-            input.value = "" 
-            try:
-                self.tab = self.query_one(TabbedContent).active_pane
-                now = datetime.now()
-                if now.minute <= 9 and event.value.split()[0] not in self.action_list:
-                        self.irc_client.connection.privmsg(self.tab.name.replace("@","").replace("+", ""), event.value)
-                        self.tab.mount(Label(f'{now.hour}:0{now.minute} <{self.irc_client.nickname}> {event.value}'))
-                elif now.minute > 9 and event.value.split()[0] not in self.action_list:
-                    self.irc_client.connection.privmsg(self.tab.name.replace("@", "").replace("+", ""), event.value)
-                    self.tab.mount(Label(f'{now.hour}:{now.minute} <{self.irc_client.nickname}> {event.value}'))
-                elif event.value.split()[0] in self.action_list:
-                    if event.value.split()[0] == "/join":
-                        await self.irc_client._intercept_join(event.value)
-                    elif event.value.split()[0] == "/part":
-                        await self.irc_client._intercept_part(event.value)
-                    elif event.value.split()[0] == "/whois":
-                        await self.irc_client._intercept_whois(event.value)
-            
+            chat_input = None
 
-            except NoMatches:
-                pass
-                 
+        if chat_input is None:
+            return
+
+        chat_input.value = ""
+
+        try:
+            self.tab = (
+                self.get_screen("irc", IRCScreen).query_one(TabbedContent).active_pane
+            )
+            now = datetime.now()
+
+            if now.minute <= 9 and event.value.split()[0] not in self.action_list:
+                self.irc_client.connection.privmsg(
+                    self.tab.name.replace("@", "").replace("+", ""),
+                    event.value,
+                )
+                self.tab.mount(
+                    Label(
+                        f"{now.hour}:0{now.minute} "
+                        f"<{self.irc_client.nickname}> {event.value}"
+                    )
+                )
+            elif now.minute > 9 and event.value.split()[0] not in self.action_list:
+                self.irc_client.connection.privmsg(
+                    self.tab.name.replace("@", "").replace("+", ""),
+                    event.value,
+                )
+                self.tab.mount(
+                    Label(
+                        f"{now.hour}:{now.minute} "
+                        f"<{self.irc_client.nickname}> {event.value}"
+                    )
+                )
+            elif event.value.split()[0] == "/join":
+                await self.irc_client._intercept_join(event.value)
+            elif event.value.split()[0] == "/part":
+                await self.irc_client._intercept_part(event.value)
+            elif event.value.split()[0] == "/whois":
+                await self.irc_client._intercept_whois(event.value)
+
+        except NoMatches:
+            pass
+
     def get_channel_list(self):
-        if self.app.channel_list is None:
+        if self.channel_list is None:
             return None
-        else:
-            return self.app.channel_list   
 
+        return self.channel_list
 
     def whois(self, nick):
         self.irc_client.connection.whois(nick)
-         
-    def irc_message(self, time, channel, sender, message, classes):
-        self.tab = self.app.query_one(TabbedContent).get_pane(channel.replace("#", "").lower())
-        if self.irc_client.nickname in message:
-            self.app.notify(f"{time} <{sender}> {message}", title=channel)
-            self.tab.mount(Label(f"{time} <{sender}> {message}", classes="highlight"))
-        else:
-            self.tab.mount(Label(f'{time} <{sender}> {message}', classes=classes))
 
+    def irc_message(self, time, channel, sender, message, classes):
+        self.tab = (
+            self.get_screen("irc", IRCScreen)
+            .query_one(TabbedContent)
+            .get_pane(channel.replace("#", "").lower())
+        )
+
+        if self.irc_client.nickname in message:
+            self.notify(f"{time} <{sender}> {message}", title=channel)
+            self.tab.mount(
+                Label(
+                    f"{time} <{sender}> {message}",
+                    classes="highlight",
+                )
+            )
+        else:
+            self.tab.mount(
+                Label(
+                    f"{time} <{sender}> {message}",
+                    classes=classes,
+                )
+            )
 
     def received_private_message(self, time, sender, message, classes):
+        tabbed_content = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
+
         try:
-            self.tab = self.app.query_one(TabbedContent).get_pane(f'{sender}')
-            self.tab.mount(Label(f'{time} <{sender}> {message}', classes=classes))
-            self.active_pane = self.app.query_one(TabbedContent).active_pane
-            if self.active_pane == self.tab:
-                pass
-            else:
-                self.notify(f'<{sender}> {message}', title="Private Message")
-          
-        except:
-            self.tab = self.app.query_one(TabbedContent).add_pane(TabPane(sender,
-                                                        Label(),
-                                                       name=sender, 
-                                                       id=f'{sender}'))
-            self.tab = self.app.query_one(TabbedContent).get_pane(f'{sender}')
-            self.tab.mount(Label(f'{time} <{sender}> {message}', classes=classes))
-            self.notify(f'<{sender}> {message}', title="Private Message")
-              
+            self.tab = tabbed_content.get_pane(sender)
+            self.tab.mount(
+                Label(
+                    f"{time} <{sender}> {message}",
+                    classes=classes,
+                )
+            )
+
+            active_pane = tabbed_content.active_pane
+            if active_pane != self.tab:
+                self.notify(f"<{sender}> {message}", title="Private Message")
+
+        except Exception:
+            tabbed_content.add_pane(
+                TabPane(
+                    sender,
+                    Label(),
+                    name=sender,
+                    id=sender,
+                )
+            )
+
+            self.tab = tabbed_content.get_pane(sender)
+            self.tab.mount(
+                Label(
+                    f"{time} <{sender}> {message}",
+                    classes=classes,
+                )
+            )
+            self.notify(f"<{sender}> {message}", title="Private Message")
 
     def add_to_tree(self, channel, user_list):
-        tree = self.app.query_one(ChannelTree)
-        self.app.channel_list = self.app.get_channel_list()
-        self.app.channel_ops = ChannelOperations()
-        if self.app.channel_list is not None and channel != self.app.channel_list.data['id']:
-                channels_list = tree.root.add(channel, data={"id": channel})
-                self.app.channel_list = channels_list
-                self.app.node_list[channel] = channels_list
+        tree = self.get_screen("irc", IRCScreen).query_one(ChannelTree)
+        self.channel_list = self.get_channel_list()
+        self.channel_ops = ChannelOperations()
+
+        if self.channel_list is not None and channel != self.channel_list.data["id"]:
+            channels_list = tree.root.add(channel, data={"id": channel})
+            self.channel_list = channels_list
+            self.node_list[channel] = channels_list
         elif self.channel_list is None:
-                channels_list = tree.root.add(channel, data={"id": channel})
-                self.app.channel_list = channels_list
-                self.app.node_list[channel] = channels_list
+            channels_list = tree.root.add(channel, data={"id": channel})
+            self.channel_list = channels_list
+            self.node_list[channel] = channels_list
         else:
             try:
                 self.remove_from_tree(channel)
-            except:
+            except Exception:
                 pass
+
             channels_list = tree.root.add(channel, data={"id": channel})
-            self.app.channel_list = channels_list
-            self.app.node_list[channel] = channels_list
+            self.channel_list = channels_list
+            self.node_list[channel] = channels_list
+
         for user in user_list:
-            self.app.channel_list.add_leaf(user, data={"id": user})
+            self.channel_list.add_leaf(user, data={"id": user})
+
         for user in user_list:
-             self.app.users.add(user)
-        else:
-            pass
+            self.users.add(user)
 
     def remove_from_tree(self, channel):
-        node = self.app.node_list[channel]
+        node = self.node_list[channel]
         node.remove()
-        
-    @work(exclusive=True)
+
+    @work(group="irc-messages", exclusive=False, exit_on_error=False)
     async def handle_irc_message(self, time, channel, sender, message, classes):
         worker = get_current_worker()
+
         if not worker.is_cancelled:
-            self.irc_message(time, channel, sender, message, classes) 
-        else:
-            pass
-    
-    @work(exclusive=True)
+            await self._ensure_channel_tab(channel)
+            self.irc_message(time, channel, sender, message, classes)
+
+    @work(
+        group="irc-private-messages",
+        exclusive=False,
+        exit_on_error=False,
+    )
     async def handle_private_message(self, time, sender, message, classes):
         worker = get_current_worker()
+
         if not worker.is_cancelled:
-            self.received_private_message(time, sender, message, classes) 
-        else:
-            pass
+            self.received_private_message(time, sender, message, classes)
+
     async def on_shutdown(self):
-        self.irc_client.on_disconnect() 
+        try:
+            self.irc_client.on_disconnect()
+        except AttributeError:
+            pass
 
 
 def main():
