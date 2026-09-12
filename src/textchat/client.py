@@ -2,13 +2,30 @@ import functools
 import ssl
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from dataclasses import field
 from datetime import datetime
 
 import irc
 from irc.client import SimpleIRCClient
-from textual.widgets import TabbedContent
 
 from .db.db import ChannelOperations
+
+
+@dataclass
+class WhoisInfo:
+    """Information returned by one IRC WHOIS response."""
+
+    nickname: str
+    username: str | None = None
+    hostname: str | None = None
+    realname: str | None = None
+    server: str | None = None
+    server_info: str | None = None
+    account: str | None = None
+    channels: list[str] = field(default_factory=list)
+    idle_seconds: int | None = None
+    error: str | None = None
 
 
 class IRCApp(SimpleIRCClient):
@@ -50,7 +67,7 @@ class IRCApp(SimpleIRCClient):
         self.channel_users = {}
         self.channel_names = {}
         self._names_in_progress = set()
-        self.user_info = None
+        self._whois_requests = {}
 
     @staticmethod
     def _channel_key(channel):
@@ -181,47 +198,121 @@ class IRCApp(SimpleIRCClient):
 
         return False
 
-    async def _intercept_whois(self, message):
-        self.tab = self.app.query_one(TabbedContent).active_pane
+    def request_whois(self, nickname):
+        """Request WHOIS data and retain the response until it is complete."""
+        nickname = nickname.lstrip("@+%&~")
+        if not nickname:
+            return
 
-        if message.startswith("/whois"):
-            user = message.split()[1]
-            self.user_info = self.app.whois(user)
-            print(f"{self.user_info=}")
+        self._whois_requests[nickname.casefold()] = WhoisInfo(nickname=nickname)
+        self.connection.whois(nickname)
+
+    def _whois_info(self, event):
+        if not event.arguments:
+            return None
+
+        return self._whois_requests.get(event.arguments[0].casefold())
+
+    def on_whoisuser(self, connection, event):
+        # RPL_WHOISUSER: <nick> <username> <host> * :<real name>
+        info = self._whois_info(event)
+        if info is not None and len(event.arguments) >= 5:
+            info.username = event.arguments[1]
+            info.hostname = event.arguments[2]
+            info.realname = event.arguments[4]
+
+    def on_whoisserver(self, connection, event):
+        # RPL_WHOISSERVER: <nick> <server> :<server description>
+        info = self._whois_info(event)
+        if info is not None and len(event.arguments) >= 3:
+            info.server = event.arguments[1]
+            info.server_info = event.arguments[2]
+
+    def on_whoischannels(self, connection, event):
+        info = self._whois_info(event)
+        if info is not None and len(event.arguments) >= 2:
+            info.channels = event.arguments[1].split()
+
+    def on_whoisidle(self, connection, event):
+        info = self._whois_info(event)
+        if info is not None and len(event.arguments) >= 2:
+            try:
+                info.idle_seconds = int(event.arguments[1])
+            except ValueError:
+                pass
+
+    def on_whoisaccount(self, connection, event):
+        info = self._whois_info(event)
+        if info is not None and len(event.arguments) >= 2:
+            info.account = event.arguments[1]
+
+    def on_nosuchnick(self, connection, event):
+        info = self._whois_info(event)
+        if info is None:
+            return
+
+        info.error = event.arguments[-1] if len(event.arguments) > 1 else "No such nick"
+        self._whois_requests.pop(info.nickname.casefold(), None)
+        self.app.handle_whois_result(info)
+
+    def on_endofwhois(self, connection, event):
+        info = self._whois_info(event)
+        if info is None:
+            return
+
+        self._whois_requests.pop(info.nickname.casefold(), None)
+        self.app.handle_whois_result(info)
+
+    async def _intercept_whois(self, message):
+        command, _, nickname = message.partition(" ")
+        if command != "/whois":
+            return False
+
+        if not nickname.strip():
+            self.app.notify("Usage: /whois <nickname>")
             return True
 
-        return False
-
-    def on_whois(self, connection, event):
-        print(f"{event.arguments[1]=}")
+        self.request_whois(nickname.strip())
+        return True
 
     def send_private_message(self, target, message):
         self.connection.privmsg(target, message)
 
     async def _intercept_part(self, message):
-        if message.startswith("/part"):
-            channel = message.split()[1]
-            self.connection.part(channel)
-            self.channels.remove(channel)
+        command, _, channel = message.partition(" ")
+        if command != "/part":
+            return False
 
-            channel_ops = ChannelOperations()
-            await channel_ops.delete_channel(channel)
-
-            await self.app.get_screen("irc").query_one(TabbedContent).remove_pane(
-                channel.replace("#", "").lower()
-            )
-            self.app.remove_from_tree(channel)
+        if not channel.strip():
+            self.app.notify("Usage: /part <channel>")
             return True
 
-        return False
+        await self.part_channel(channel.strip().split(maxsplit=1)[0])
+        return True
+
+    async def part_channel(self, channel):
+        """Part a channel whether it originated locally or through ZNC."""
+        channel_key = self._channel_key(channel)
+        self.connection.part(channel)
+        if channel in self.channels:
+            self.channels.remove(channel)
+
+        # Do this before the server's PART reply arrives. Otherwise the reply
+        # can publish the cached member list and recreate the removed node.
+        self.channel_users.pop(channel_key, None)
+        self.channel_names.pop(channel_key, None)
+        self._names_in_progress.discard(channel_key)
+
+        channel_ops = ChannelOperations()
+        await channel_ops.delete_channel(channel)
+        await self.app._close_channel_tab(channel)
+        self.app.remove_from_tree(channel)
 
     def on_pubmsg(self, connection, event):
         sender = event.source.nick
         message = event.arguments[0]
         channel = event.target
         now = datetime.now()
-
-        connection.whois(sender)
 
         if now.minute <= 9:
             self.app.handle_irc_message(

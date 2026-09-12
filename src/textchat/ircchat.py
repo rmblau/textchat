@@ -5,11 +5,14 @@ from pathlib import Path
 
 from rich.text import Text
 from textchat.client import IRCApp
+from textchat.client import WhoisInfo
 from textchat.db.base import create_table
 from textchat.db.db import ChannelOperations
+from textchat.screens.context_menu import ContextTarget
 from textchat.screens.irc import IRCScreen
 from textchat.screens.quit import QuitScreen
 from textchat.screens.settings import SettingsScreen
+from textchat.screens.whois import WhoisScreen
 from textchat.utils.channels import load_channels
 from textchat.utils.nickcomplete import NickCompletion
 from textchat.widgets.channeltree import ChannelTree
@@ -351,10 +354,91 @@ class TextChat(App):
         """Hide the active tab without parting the ZNC channel."""
         tabbed_content = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
         active_pane = tabbed_content.active_pane
-        if active_pane is None or active_pane.id is None:
+        if active_pane is None or not active_pane.name:
             return
 
-        await tabbed_content.remove_pane(active_pane.id)
+        await self._close_channel_tab(active_pane.name)
+
+    async def _close_channel_tab(self, channel) -> None:
+        """Remove one tab without sending an IRC PART command."""
+        tabbed_content = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
+        pane_id = self._channel_pane_id(channel)
+        try:
+            tabbed_content.get_pane(pane_id)
+        except NoMatches:
+            return
+        await tabbed_content.remove_pane(pane_id)
+
+    @work(group="private-messages", exclusive=False, exit_on_error=False)
+    async def open_private_message(self, nickname) -> None:
+        """Open and select a private-message tab for an IRC nickname."""
+        nickname = nickname.lstrip("@+%&~")
+        if not nickname:
+            return
+
+        tabbed_content = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
+        try:
+            tabbed_content.get_pane(nickname)
+        except NoMatches:
+            await tabbed_content.add_pane(
+                TabPane(nickname, Label(), name=nickname, id=nickname)
+            )
+        tabbed_content.active = nickname
+
+    @work(group="channel-tabs", exclusive=False, exit_on_error=False)
+    async def open_channel_tab(self, channel) -> None:
+        await self._ensure_channel_tab(channel)
+        tabbed_content = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
+        tabbed_content.active = self._channel_pane_id(channel)
+
+    @work(group="channel-tabs", exclusive=False, exit_on_error=False)
+    async def close_channel_tab(self, channel) -> None:
+        await self._close_channel_tab(channel)
+
+    @work(group="channel-parts", exclusive=False, exit_on_error=False)
+    async def part_channel(self, channel) -> None:
+        await self.irc_client.part_channel(channel)
+
+    async def part_current_channel(self) -> None:
+        """Part the active IRC channel, but never treat a PM as a channel."""
+        tabbed_content = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
+        active_pane = tabbed_content.active_pane
+        channel = active_pane.name if active_pane is not None else None
+
+        if not channel or channel[0] not in "#&!+":
+            self.notify("/part must be used from a channel tab")
+            return
+
+        await self.irc_client.part_channel(channel)
+
+    def request_whois(self, nickname) -> None:
+        self.irc_client.request_whois(nickname)
+
+    @work(group="whois-results", exclusive=False, exit_on_error=False)
+    async def handle_whois_result(self, info: WhoisInfo) -> None:
+        await self.push_screen(WhoisScreen(info))
+
+    def handle_context_action(
+        self,
+        target: ContextTarget,
+        action: str | None,
+    ) -> None:
+        if action is None:
+            return
+
+        if target.kind == "user":
+            if action == "message":
+                self.open_private_message(target.value)
+            elif action == "whois":
+                self.request_whois(target.value)
+            return
+
+        if action == "open":
+            self.open_channel_tab(target.value)
+        elif action == "close":
+            self.close_channel_tab(target.value)
+        elif action == "part":
+            self.part_channel(target.value)
 
     async def action_return_home(self) -> None:
         channels = await load_channels()
@@ -374,68 +458,67 @@ class TextChat(App):
         except Exception as error:
             print(error)
 
+    async def _handle_chat_command(self, message) -> None:
+        """Dispatch commands handled by Textchat itself."""
+        command, _, argument = message.partition(" ")
+
+        if command == "/join":
+            await self.irc_client._intercept_join(message)
+        elif command == "/part":
+            if argument.strip():
+                await self.irc_client._intercept_part(message)
+            else:
+                await self.part_current_channel()
+        elif command == "/whois":
+            await self.irc_client._intercept_whois(message)
+        elif command == "/close":
+            await self.action_close_current_tab()
+
+    async def _send_plain_message(self, message) -> None:
+        """Send and render a non-command message in the active tab."""
+        try:
+            self.tab = (
+                self.get_screen("irc", IRCScreen).query_one(TabbedContent).active_pane
+            )
+        except NoMatches:
+            return
+
+        if self.tab is None or not self.tab.name:
+            return
+
+        self.irc_client.connection.privmsg(
+            self.tab.name.replace("@", "").replace("+", ""),
+            message,
+        )
+        now = datetime.now().strftime("%H:%M")
+        self._append_message(
+            self.tab,
+            self._message_label(f"{now} <{self.irc_client.nickname}> {message}"),
+        )
+
     @on(ChatInput.Submitted)
     async def send_message(self, event) -> None:
         try:
             chat_input = self.get_screen("irc", IRCScreen).query_one(ChatInput)
         except NoMatches:
-            chat_input = None
-
-        if chat_input is None:
             return
 
         chat_input.value = ""
+        message = event.value.strip()
+        if not message:
+            return
 
-        try:
-            self.tab = (
-                self.get_screen("irc", IRCScreen).query_one(TabbedContent).active_pane
-            )
-            now = datetime.now()
-
-            if now.minute <= 9 and event.value.split()[0] not in self.action_list:
-                self.irc_client.connection.privmsg(
-                    self.tab.name.replace("@", "").replace("+", ""),
-                    event.value,
-                )
-                self._append_message(
-                    self.tab,
-                    self._message_label(
-                        f"{now.hour}:0{now.minute} "
-                        f"<{self.irc_client.nickname}> {event.value}"
-                    ),
-                )
-            elif now.minute > 9 and event.value.split()[0] not in self.action_list:
-                self.irc_client.connection.privmsg(
-                    self.tab.name.replace("@", "").replace("+", ""),
-                    event.value,
-                )
-                self._append_message(
-                    self.tab,
-                    self._message_label(
-                        f"{now.hour}:{now.minute} "
-                        f"<{self.irc_client.nickname}> {event.value}"
-                    ),
-                )
-            elif event.value.split()[0] == "/join":
-                await self.irc_client._intercept_join(event.value)
-            elif event.value.split()[0] == "/part":
-                await self.irc_client._intercept_part(event.value)
-            elif event.value.split()[0] == "/whois":
-                await self.irc_client._intercept_whois(event.value)
-            elif event.value.split()[0] == "/close":
-                await self.action_close_current_tab()
-
-        except NoMatches:
-            pass
+        command = message.split(maxsplit=1)[0]
+        if command in self.action_list:
+            await self._handle_chat_command(message)
+        else:
+            await self._send_plain_message(message)
 
     def get_channel_list(self):
         if self.channel_list is None:
             return None
 
         return self.channel_list
-
-    def whois(self, nick):
-        self.irc_client.connection.whois(nick)
 
     def irc_message(self, time, channel, sender, message, classes):
         self.tab = (
@@ -509,7 +592,10 @@ class TextChat(App):
         if existing_node is not None:
             existing_node.remove()
 
-        channel_node = tree.root.add(channel, data={"id": channel})
+        channel_node = tree.root.add(
+            channel,
+            data={"id": channel, "kind": "channel"},
+        )
         self.node_list[channel_key] = channel_node
         self.channel_list = channel_node
 
@@ -517,7 +603,7 @@ class TextChat(App):
             user_list,
             key=lambda nickname: nickname.lstrip("@+%&~").casefold(),
         ):
-            channel_node.add_leaf(user, data={"id": user})
+            channel_node.add_leaf(user, data={"id": user, "kind": "user"})
 
     def remove_from_tree(self, channel):
         channel_key = self._channel_key(channel)

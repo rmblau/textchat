@@ -43,6 +43,36 @@ QuitScreen {
     align: center middle;
 }
 
+WhoisScreen, ContextMenu, PrivateMessageScreen {
+    align: center middle;
+}
+
+#whois-dialog, #context-menu, #private-message-dialog {
+    width: 60;
+    height: auto;
+    max-height: 80%;
+    padding: 1 2;
+    border: thick $background 80%;
+    background: $surface;
+    content-align: left top;
+}
+
+#whois-title, #context-title, #private-message-title {
+    margin-bottom: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+#whois-actions, #private-message-actions {
+    height: auto;
+    margin-top: 1;
+}
+
+.whois-error {
+    color: $error;
+    text-style: bold;
+}
+
 #dialog {
     grid-size: 2;
     grid-gutter: 1 2;
