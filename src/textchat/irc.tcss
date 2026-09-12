@@ -1,18 +1,57 @@
 #chat-input {
-    dock: bottom;
-    width: 121;
     margin: 1;
+}
 
-    }
+#chat-layout {
+    width: 1fr;
+    height: 1fr;
+}
+
 Dropdown {
     max-width: 32
 }
 
 Label {
-    width: 150
+    width: 1fr;
+    height: auto;
 }
+
+SettingsScreen {
+    align: center top;
+}
+
+#settings-form {
+    width: 1fr;
+    max-width: 72;
+    height: 1fr;
+    padding: 1 2;
+    overflow-y: auto;
+}
+
+#profile-actions {
+    height: auto;
+    margin-top: 1;
+}
+
+.settings-title {
+    margin-bottom: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+.settings-help {
+    margin-bottom: 1;
+    color: $text-muted;
+}
+
+.settings-label {
+    margin-top: 1;
+    color: $text-muted;
+}
+
 TabbedContent {
-    width:187;
+    width: 1fr;
+    height: 1fr;
     overflow-y: auto;
 }
 
@@ -24,8 +63,9 @@ Toast {
     padding: 3;
 }
 #sidebar {
-    dock: right;
-    width: 24;
+    width: 25%;
+    min-width: 16;
+    max-width: 30;
     height: 100%;
     color: green;
 }
@@ -34,6 +74,36 @@ Toast {
 }
 QuitScreen {
     align: center middle;
+}
+
+WhoisScreen, PrivateMessageScreen {
+    align: center middle;
+}
+
+#whois-dialog, #private-message-dialog {
+    width: 60;
+    height: auto;
+    max-height: 80%;
+    padding: 1 2;
+    border: thick $background 80%;
+    background: $surface;
+    content-align: left top;
+}
+
+#whois-title, #private-message-title {
+    margin-bottom: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+#whois-actions, #private-message-actions {
+    height: auto;
+    margin-top: 1;
+}
+
+.whois-error {
+    color: $error;
+    text-style: bold;
 }
 
 #dialog {
@@ -63,5 +133,3 @@ Vertical {
 .column {
     width: 1fr;
 }
-
-

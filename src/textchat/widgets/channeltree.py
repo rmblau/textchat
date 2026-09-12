@@ -1,9 +1,11 @@
 from textual.widgets import Tree
-from textchat.screens.whois import WhoisScreen
+
 
 class ChannelTree(Tree):
-   def on_tree_node_selected(self, node: Tree) -> None:
-        whois = WhoisScreen()
-        self.app.whois(node.node.data['id'])
-        self.app.user = node.node.data['id']
-        self.app.push_screen(whois)
+    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
+        """Show WHOIS details when a member is selected in the channel tree."""
+        data = event.node.data or {}
+        if data.get("kind") != "user":
+            return
+
+        self.app.request_whois(data["id"])

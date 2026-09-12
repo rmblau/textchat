@@ -1,5 +1,4 @@
 Input {
     dock: bottom;
-    width: 187;
-    margin-bottom: 1
+    margin: 1;
 }
