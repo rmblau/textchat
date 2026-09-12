@@ -47,8 +47,38 @@ class IRCApp(SimpleIRCClient):
         self._thread_pool = ThreadPoolExecutor(max_workers=1)
         self._running = False
         self._stopping = False
-        self.user_list = set()
+        self.channel_users = {}
+        self.channel_names = {}
+        self._names_in_progress = set()
         self.user_info = None
+
+    @staticmethod
+    def _channel_key(channel):
+        return channel.casefold()
+
+    @staticmethod
+    def _nickname_key(nickname):
+        return nickname.lstrip("@+%&~").casefold()
+
+    def _publish_channel_users(self, channel):
+        """Refresh the UI with members belonging to just this channel."""
+        channel_key = self._channel_key(channel)
+        self.app.update_channel_tree(
+            self.channel_names.get(channel_key, channel),
+            self.channel_users.get(channel_key, set()).copy(),
+        )
+
+    def _remove_user_from_channel(self, channel, nickname):
+        channel_key = self._channel_key(channel)
+        users = self.channel_users.get(channel_key)
+        if users is None:
+            return
+
+        nickname_key = self._nickname_key(nickname)
+        self.channel_users[channel_key] = {
+            user for user in users if self._nickname_key(user) != nickname_key
+        }
+        self._publish_channel_users(channel)
 
     def start_event_loop(self):
         if self._running:
@@ -257,13 +287,26 @@ class IRCApp(SimpleIRCClient):
     def on_namreply(self, connection, event):
         channel = event.arguments[1]
         user_list = event.arguments[2].split()
+        channel_key = self._channel_key(channel)
 
         self.app.ensure_channel_tab(channel)
 
-        for user in user_list:
-            self.user_list.add(user)
+        # A NAMES response can be split across multiple replies. Reset only at
+        # the start of a response, then merge the following chunks.
+        if channel_key not in self._names_in_progress:
+            self.channel_users[channel_key] = set()
+            self.channel_names[channel_key] = channel
+            self._names_in_progress.add(channel_key)
 
-        self.app.update_channel_tree(channel, self.user_list.copy())
+        self.channel_users[channel_key].update(user_list)
+
+    def on_endofnames(self, connection, event):
+        for argument in event.arguments:
+            if argument and argument[0] in "#&!+":
+                channel_key = self._channel_key(argument)
+                self._names_in_progress.discard(channel_key)
+                self._publish_channel_users(argument)
+                break
 
     def on_join(self, connection, event):
         sender = event.source.nick
@@ -274,10 +317,15 @@ class IRCApp(SimpleIRCClient):
             message = "has joined"
 
         channel = event.target
+        channel_key = self._channel_key(channel)
         now = datetime.now()
         classes = "italics"
 
         self.app.ensure_channel_tab(channel)
+
+        self.channel_names[channel_key] = channel
+        self.channel_users.setdefault(channel_key, set()).add(sender)
+        self._publish_channel_users(channel)
 
         if now.minute <= 9 and self.nickname != sender:
             self.app.handle_irc_message(
@@ -296,5 +344,14 @@ class IRCApp(SimpleIRCClient):
                 classes,
             )
 
-    def on_disconnect(self):
+    def on_part(self, connection, event):
+        self._remove_user_from_channel(event.target, event.source.nick)
+
+    def on_quit(self, connection, event):
+        nickname = event.source.nick
+        for channel_key, channel in tuple(self.channel_names.items()):
+            if channel_key in self.channel_users:
+                self._remove_user_from_channel(channel, nickname)
+
+    def on_disconnect(self, connection, event):
         self.stop()

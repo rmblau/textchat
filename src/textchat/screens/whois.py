@@ -1,5 +1,6 @@
 from textual.app import ComposeResult
 from textual.containers import Grid
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Button
 from textual.widgets import Label
@@ -16,29 +17,20 @@ class WhoisScreen(ModalScreen[bool]):
             id="dialog",
         )
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "message":
+            user = self.app.user.replace("@", "").replace("+", "")
+            tabbed_content = self.app.get_screen("irc").query_one(TabbedContent)
+
             try:
-                self.tab = (
-                    self.app.irc_screen()
-                    .query_one(TabbedContent)
-                    .get_pane(f'{self.app.user.replace("@", "").replace("+", "")}')
+                tabbed_content.get_pane(user)
+            except NoMatches:
+                await tabbed_content.add_pane(
+                    TabPane(user, Label(), name=user, id=user)
                 )
 
-            except:
-                self.active_tab = self.app.SCREENS["irc"].query_one(TabbedContent)
-                self.active_tab.add_pane(
-                    TabPane(
-                        self.app.user.replace("@", "").replace("+", ""),
-                        Label(),
-                        name=self.app.user.replace("@", "").replace("+", ""),
-                        id=f'{self.app.user.replace("@", "").replace("+", "")}',
-                    )
-                )
-                self.active_tab.active = self.app.user.replace("@", "").replace("+", "")
+            tabbed_content.active = user
 
             self.dismiss(True)
-
         else:
-
             self.dismiss(False)

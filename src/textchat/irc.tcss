@@ -1,18 +1,24 @@
 #chat-input {
-    dock: bottom;
-    width: 121;
     margin: 1;
+}
 
-    }
+#chat-layout {
+    width: 1fr;
+    height: 1fr;
+}
+
 Dropdown {
     max-width: 32
 }
 
 Label {
-    width: 150
+    width: 1fr;
+    height: auto;
 }
+
 TabbedContent {
-    width:187;
+    width: 1fr;
+    height: 1fr;
     overflow-y: auto;
 }
 
@@ -24,8 +30,9 @@ Toast {
     padding: 3;
 }
 #sidebar {
-    dock: right;
-    width: 24;
+    width: 25%;
+    min-width: 16;
+    max-width: 30;
     height: 100%;
     color: green;
 }
@@ -63,5 +70,3 @@ Vertical {
 .column {
     width: 1fr;
 }
-
-

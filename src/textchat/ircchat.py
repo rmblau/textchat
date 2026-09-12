@@ -1,7 +1,9 @@
+import hashlib
 import re
 from datetime import datetime
 from pathlib import Path
 
+from rich.text import Text
 from textchat.client import IRCApp
 from textchat.db.base import create_table
 from textchat.db.db import ChannelOperations
@@ -9,6 +11,7 @@ from textchat.screens.irc import IRCScreen
 from textchat.screens.quit import QuitScreen
 from textchat.screens.settings import SettingsScreen
 from textchat.utils.channels import load_channels
+from textchat.utils.nickcomplete import NickCompletion
 from textchat.widgets.channeltree import ChannelTree
 from textchat.widgets.input import ChatInput
 from textual import on
@@ -18,11 +21,71 @@ from textual.css.query import NoMatches
 from textual.widgets import Label
 from textual.widgets import TabbedContent
 from textual.widgets import TabPane
+from textual.widgets._content_switcher import ContentSwitcher
+from textual.widgets._tabbed_content import ContentTabs
 from textual.worker import get_current_worker
 
 
 class TextChat(App):
-    CSS_PATH = Path("irc.tcss")
+    # Resolve beside this module so running from the repository and from an
+    # installed package use the same responsive stylesheet.
+    CSS_PATH = Path(__file__).with_name("irc.tcss")
+    URL_PATTERN = re.compile(r"https?://[^\s<>\"']+")
+    MESSAGE_PREFIX_PATTERN = re.compile(
+        r"^(?P<time>\d{1,2}:\d{2}) <(?P<nickname>[^>]+)> "
+    )
+    NICK_COLORS = (
+        "#d14f4f",
+        "#f54d36",
+        "#f5815d",
+        "#d1692e",
+        "#f5a65d",
+        "#f5a836",
+        "#d1ad4f",
+        "#f5d636",
+        "#f5ef5d",
+        "#c4d12e",
+        "#d6f55d",
+        "#b8f536",
+        "#98d14f",
+        "#8af536",
+        "#8ef55d",
+        "#4fd12e",
+        "#69f55d",
+        "#36f53d",
+        "#4fd164",
+        "#36f56b",
+        "#5df59a",
+        "#2ed183",
+        "#5df5be",
+        "#36f5c7",
+        "#4fd1c2",
+        "#36f5f5",
+        "#5de3f5",
+        "#2eaad1",
+        "#5dbef5",
+        "#3699f5",
+        "#4f83d1",
+        "#366bf5",
+        "#5d75f5",
+        "#2e35d1",
+        "#695df5",
+        "#5c36f5",
+        "#794fd1",
+        "#8a36f5",
+        "#b25df5",
+        "#9d2ed1",
+        "#d65df5",
+        "#e636f5",
+        "#d14fcc",
+        "#f536d6",
+        "#f55dca",
+        "#d12e90",
+        "#f55da6",
+        "#f5367b",
+        "#d14f6f",
+        "#f5364d",
+    )
 
     SCREENS = {
         "irc": IRCScreen,
@@ -32,8 +95,11 @@ class TextChat(App):
     BINDINGS = [
         ("ctrl+h", "return_home", "Home"),
         ("ctrl+s", "open_settings", "Settings"),
+        ("ctrl+w", "close_current_tab", "Close tab"),
         ("ctrl+q", "request_quit", "Quit"),
         ("ctrl+d", "toggle_dark", "Toggle dark mode"),
+        ("ctrl+shift+left", "move_tab_left", "Move tab left"),
+        ("ctrl+shift+right", "move_tab_right", "Move tab right"),
     ]
 
     MODES = {
@@ -46,9 +112,12 @@ class TextChat(App):
         await create_table()
 
         self.channel_list = None
-        self.users = set()
+        # IRC prefixes are per-channel: the same nick may be in one channel but
+        # not another. Keep the list that powers the sidebar and completion in
+        # the same channel-scoped structure.
+        self.channel_users = {}
         self.node_list = {}
-        self.action_list = ["/join", "/part", "/msg", "/whois"]
+        self.action_list = ["/join", "/part", "/msg", "/whois", "/close"]
         self.channel_ops = ChannelOperations()
         self.irc_screen = self.get_screen("irc", IRCScreen)
 
@@ -65,6 +134,42 @@ class TextChat(App):
 
         self.irc_client = self._make_irc_client(server, existing_channels)
         self.irc_client.start_event_loop()
+
+    async def action_move_tab_left(self) -> None:
+        await self._move_active_tab(-1)
+
+    async def action_move_tab_right(self) -> None:
+        await self._move_active_tab(1)
+
+    async def _move_active_tab(self, direction: int) -> None:
+        tabbed = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
+        active_pane = tabbed.active_pane
+        if active_pane is None or active_pane.id is None:
+            return
+
+        switcher = tabbed.get_child_by_type(ContentSwitcher)
+        panes = [pane for pane in switcher.children if isinstance(pane, TabPane)]
+        index = panes.index(active_pane)
+        destination = index + direction
+
+        if not 0 <= destination < len(panes):
+            return
+
+        neighbor = panes[destination]
+        tabs = tabbed.get_child_by_type(ContentTabs)
+        tab_list = tabs.query_one("#tabs-list")
+
+        active_tab = tabbed.get_tab(active_pane)
+        neighbor_tab = tabbed.get_tab(neighbor)
+
+        if direction < 0:
+            tab_list.move_child(active_tab, before=neighbor_tab)
+            switcher.move_child(active_pane, before=neighbor)
+        else:
+            tab_list.move_child(active_tab, after=neighbor_tab)
+            switcher.move_child(active_pane, after=neighbor)
+
+        tabbed.active = active_pane.id
 
     def _make_irc_client(self, server, channels):
         return IRCApp(
@@ -83,6 +188,11 @@ class TextChat(App):
     @staticmethod
     def _channel_pane_id(channel):
         return channel.replace("#", "").lower()
+
+    @staticmethod
+    def _channel_key(channel):
+        """Return the case-insensitive key used for IRC channel state."""
+        return channel.casefold()
 
     async def _ensure_channel_tab(self, channel):
         """Create a tab when local settings or ZNC expose a channel."""
@@ -113,20 +223,41 @@ class TextChat(App):
         self.dark = not self.dark
 
     def complete_nickname(self, chat_input):
-        """Replace the word before the cursor with a known IRC nickname."""
+        active_pane = self.get_screen("irc").query_one(TabbedContent).active_pane
+        if active_pane is None:
+            return False
+
+        channel = active_pane.name.casefold()
+        state = getattr(chat_input, "nick_completion", None)
+
+        if (
+            state
+            and state.channel == channel
+            and chat_input.value == state.rendered_value
+            and chat_input.cursor_position == state.cursor_position
+        ):
+            state.index = (state.index + 1) % len(state.candidates)
+            nickname = state.candidates[state.index]
+            replacement = nickname + state.suffix
+
+            chat_input.value = state.before + replacement + state.after
+            chat_input.cursor_position = len(state.before) + len(replacement)
+            state.rendered_value = chat_input.value
+            state.cursor_position = chat_input.cursor_position
+            return True
+
         before_cursor = chat_input.value[: chat_input.cursor_position]
         match = re.search(r"(\S+)$", before_cursor)
-        if match is None or match.group(1).startswith("/"):
+        if match is None:
             return False
 
         prefix = match.group(1).lstrip("@+%&~")
-        if not prefix:
-            return False
+        users = self.channel_users.get(channel, set())
 
         candidates = sorted(
             {
                 user.lstrip("@+%&~")
-                for user in self.users
+                for user in users
                 if user.lstrip("@+%&~").casefold().startswith(prefix.casefold())
             },
             key=str.casefold,
@@ -134,16 +265,72 @@ class TextChat(App):
         if not candidates:
             return False
 
-        nickname = candidates[0]
+        before = before_cursor[: match.start()]
+        after = chat_input.value[chat_input.cursor_position :]
         suffix = ": " if match.start() == 0 else ""
-        replacement = nickname + suffix
-        chat_input.value = (
-            before_cursor[: match.start()]
-            + replacement
-            + chat_input.value[chat_input.cursor_position :]
+        replacement = candidates[0] + suffix
+
+        chat_input.value = before + replacement + after
+        chat_input.cursor_position = len(before) + len(replacement)
+        chat_input.nick_completion = NickCompletion(
+            channel=channel,
+            before=before,
+            after=after,
+            candidates=candidates,
+            index=0,
+            suffix=suffix,
+            rendered_value=chat_input.value,
+            cursor_position=chat_input.cursor_position,
         )
-        chat_input.cursor_position = match.start() + len(replacement)
         return True
+
+    @classmethod
+    def _message_text(cls, message):
+        text = Text(message)
+
+        # Use a stable, readable color for each nick. ``hash()`` is avoided
+        # because Python randomizes it between application launches.
+        prefix = cls.MESSAGE_PREFIX_PATTERN.match(message)
+        if prefix is not None:
+            nickname = prefix.group("nickname")
+            digest = hashlib.blake2b(
+                nickname.casefold().encode("utf-8"),
+                digest_size=4,
+            ).digest()
+            color_index = int.from_bytes(digest, "big") % len(cls.NICK_COLORS)
+            text.stylize("dim", prefix.start(), prefix.start("nickname"))
+            text.stylize(
+                f"bold {cls.NICK_COLORS[color_index]}",
+                prefix.start("nickname"),
+                prefix.end("nickname"),
+            )
+            text.stylize("dim", prefix.end("nickname"), prefix.end())
+
+        for match in cls.URL_PATTERN.finditer(message):
+            url = match.group().rstrip(".,!?;:)]}")
+            if not url:
+                continue
+
+            start = match.start()
+            end = start + len(url)
+            text.stylize("underline cyan", start, end)
+            text.stylize(f"link {url}", start, end)
+
+        return text
+
+    @classmethod
+    def _message_label(cls, message, classes=None):
+        return Label(cls._message_text(message), markup=False, classes=classes)
+
+    def _append_message(self, pane, message_label):
+        """Mount a message and follow it once Textual has refreshed the layout."""
+        pane.mount(message_label)
+        tabbed_content = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
+        self.call_after_refresh(
+            tabbed_content.scroll_end,
+            animate=False,
+            force=True,
+        )
 
     def action_request_quit(self) -> None:
         def check_quit(quit: bool) -> None:
@@ -159,6 +346,15 @@ class TextChat(App):
 
     def action_open_settings(self) -> None:
         self.push_screen(SettingsScreen())
+
+    async def action_close_current_tab(self) -> None:
+        """Hide the active tab without parting the ZNC channel."""
+        tabbed_content = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
+        active_pane = tabbed_content.active_pane
+        if active_pane is None or active_pane.id is None:
+            return
+
+        await tabbed_content.remove_pane(active_pane.id)
 
     async def action_return_home(self) -> None:
         channels = await load_channels()
@@ -201,22 +397,24 @@ class TextChat(App):
                     self.tab.name.replace("@", "").replace("+", ""),
                     event.value,
                 )
-                self.tab.mount(
-                    Label(
+                self._append_message(
+                    self.tab,
+                    self._message_label(
                         f"{now.hour}:0{now.minute} "
                         f"<{self.irc_client.nickname}> {event.value}"
-                    )
+                    ),
                 )
             elif now.minute > 9 and event.value.split()[0] not in self.action_list:
                 self.irc_client.connection.privmsg(
                     self.tab.name.replace("@", "").replace("+", ""),
                     event.value,
                 )
-                self.tab.mount(
-                    Label(
+                self._append_message(
+                    self.tab,
+                    self._message_label(
                         f"{now.hour}:{now.minute} "
                         f"<{self.irc_client.nickname}> {event.value}"
-                    )
+                    ),
                 )
             elif event.value.split()[0] == "/join":
                 await self.irc_client._intercept_join(event.value)
@@ -224,6 +422,8 @@ class TextChat(App):
                 await self.irc_client._intercept_part(event.value)
             elif event.value.split()[0] == "/whois":
                 await self.irc_client._intercept_whois(event.value)
+            elif event.value.split()[0] == "/close":
+                await self.action_close_current_tab()
 
         except NoMatches:
             pass
@@ -246,18 +446,20 @@ class TextChat(App):
 
         if self.irc_client.nickname in message:
             self.notify(f"{time} <{sender}> {message}", title=channel)
-            self.tab.mount(
-                Label(
+            self._append_message(
+                self.tab,
+                self._message_label(
                     f"{time} <{sender}> {message}",
                     classes="highlight",
-                )
+                ),
             )
         else:
-            self.tab.mount(
-                Label(
+            self._append_message(
+                self.tab,
+                self._message_label(
                     f"{time} <{sender}> {message}",
                     classes=classes,
-                )
+                ),
             )
 
     def received_private_message(self, time, sender, message, classes):
@@ -265,11 +467,12 @@ class TextChat(App):
 
         try:
             self.tab = tabbed_content.get_pane(sender)
-            self.tab.mount(
-                Label(
+            self._append_message(
+                self.tab,
+                self._message_label(
                     f"{time} <{sender}> {message}",
                     classes=classes,
-                )
+                ),
             )
 
             active_pane = tabbed_content.active_pane
@@ -287,46 +490,41 @@ class TextChat(App):
             )
 
             self.tab = tabbed_content.get_pane(sender)
-            self.tab.mount(
-                Label(
+            self._append_message(
+                self.tab,
+                self._message_label(
                     f"{time} <{sender}> {message}",
                     classes=classes,
-                )
+                ),
             )
             self.notify(f"<{sender}> {message}", title="Private Message")
 
     def add_to_tree(self, channel, user_list):
+        """Render one channel's current member list in the sidebar."""
         tree = self.get_screen("irc", IRCScreen).query_one(ChannelTree)
-        self.channel_list = self.get_channel_list()
-        self.channel_ops = ChannelOperations()
+        channel_key = self._channel_key(channel)
+        self.channel_users[channel_key] = set(user_list)
 
-        if self.channel_list is not None and channel != self.channel_list.data["id"]:
-            channels_list = tree.root.add(channel, data={"id": channel})
-            self.channel_list = channels_list
-            self.node_list[channel] = channels_list
-        elif self.channel_list is None:
-            channels_list = tree.root.add(channel, data={"id": channel})
-            self.channel_list = channels_list
-            self.node_list[channel] = channels_list
-        else:
-            try:
-                self.remove_from_tree(channel)
-            except Exception:
-                pass
+        existing_node = self.node_list.pop(channel_key, None)
+        if existing_node is not None:
+            existing_node.remove()
 
-            channels_list = tree.root.add(channel, data={"id": channel})
-            self.channel_list = channels_list
-            self.node_list[channel] = channels_list
+        channel_node = tree.root.add(channel, data={"id": channel})
+        self.node_list[channel_key] = channel_node
+        self.channel_list = channel_node
 
-        for user in user_list:
-            self.channel_list.add_leaf(user, data={"id": user})
-
-        for user in user_list:
-            self.users.add(user)
+        for user in sorted(
+            user_list,
+            key=lambda nickname: nickname.lstrip("@+%&~").casefold(),
+        ):
+            channel_node.add_leaf(user, data={"id": user})
 
     def remove_from_tree(self, channel):
-        node = self.node_list[channel]
-        node.remove()
+        channel_key = self._channel_key(channel)
+        node = self.node_list.pop(channel_key, None)
+        if node is not None:
+            node.remove()
+        self.channel_users.pop(channel_key, None)
 
     @work(group="irc-messages", exclusive=False, exit_on_error=False)
     async def handle_irc_message(self, time, channel, sender, message, classes):
@@ -349,7 +547,7 @@ class TextChat(App):
 
     async def on_shutdown(self):
         try:
-            self.irc_client.on_disconnect()
+            self.irc_client.stop()
         except AttributeError:
             pass
 
