@@ -1,8 +1,10 @@
 import hashlib
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 
+from irc.client import ServerNotConnectedError
 from rich.style import Style
 from rich.text import Text
 from textchat.client import IRCApp
@@ -90,6 +92,7 @@ class TextChat(App):
         "#d14f6f",
         "#f5364d",
     )
+    SLEEP_GAP_SECONDS = 15
 
     SCREENS = {
         "irc": IRCScreen,
@@ -121,9 +124,13 @@ class TextChat(App):
         # the same channel-scoped structure.
         self.channel_users = {}
         self.node_list = {}
+        self.tab_drafts = {}
         self.unread_tabs = set()
         self.active_server_id = None
-        self.action_list = ["/join", "/part", "/msg", "/whois", "/close"]
+        self._last_awake_wall_time = time.time()
+        self._wake_reconnect_pending = False
+        self._wake_monitor_started = False
+        self.action_list = ["/join", "/part", "/msg", "/whois", "/close", "/kick"]
         self.channel_ops = ChannelOperations()
         self.irc_screen = self.get_screen("irc", IRCScreen)
 
@@ -134,6 +141,15 @@ class TextChat(App):
             return
 
         await self.connect_saved_server(server.id)
+
+    @on(ChatInput.Changed)
+    def save_active_tab_draft(self, event: ChatInput.Changed) -> None:
+        """Keep the current input text with its active channel or PM tab."""
+        tabbed = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
+        pane = tabbed.active_pane
+
+        if pane is not None and pane.id is not None:
+            self.tab_drafts[pane.id] = event.value
 
     async def action_move_tab_left(self) -> None:
         await self._move_active_tab(-1)
@@ -366,6 +382,16 @@ class TextChat(App):
     def clear_active_tab_unread(self, event: TabbedContent.TabActivated) -> None:
         """Read a tab as soon as the user switches to it."""
         self._set_tab_unread(event.pane, False)
+        chat_input = self.get_screen("irc", IRCScreen).query_one(ChatInput)
+        draft = self.tab_drafts.get(event.pane.id, "")
+        chat_input.value = draft
+        chat_input.cursor_position = len(draft)
+        chat_input.nick_completion = None
+        self.call_after_refresh(
+            event.tabbed_content.scroll_end,
+            animate=False,
+            force=True,
+        )
 
     def action_request_quit(self) -> None:
         def check_quit(quit: bool) -> None:
@@ -388,7 +414,7 @@ class TextChat(App):
         active_pane = tabbed_content.active_pane
         if active_pane is None or not active_pane.name:
             return
-
+        self.tab_drafts.pop(active_pane.id, None)
         await self._close_channel_tab(active_pane.name)
 
     async def _close_channel_tab(self, channel) -> None:
@@ -465,6 +491,65 @@ class TextChat(App):
 
         await self.connect_saved_server(server.id)
 
+    async def kick_from_current_channel(self, argument: str) -> None:
+        tabbed = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
+        pane = tabbed.active_pane
+        channel = pane.name if pane else None
+
+        if not channel or channel[0] not in "#&!+":
+            self.notify("/kick must be used from a channel tab")
+            return
+
+        nickname, _, reason = argument.strip().partition(" ")
+        if not nickname:
+            self.notify("Usage: /kick <nickname> [reason]")
+            return
+
+        self.irc_client.connection.kick(
+            channel,
+            nickname.lstrip("@+%&~"),
+            reason.strip(),
+        )
+
+    def _detect_wake(self) -> None:
+        """Reconnect after the event loop resumes from computer sleep."""
+        now = time.time()
+        elapsed = now - self._last_awake_wall_time
+        self._last_awake_wall_time = now
+
+        if elapsed < self.SLEEP_GAP_SECONDS:
+            return
+
+        self._request_reconnect("Reconnecting after wake…")
+
+    def _request_reconnect(self, message: str) -> bool:
+        """Start one reconnect worker and make its reason visible to the user."""
+        if (
+            self._wake_reconnect_pending
+            or self.active_server_id is None
+            or not hasattr(self, "irc_client")
+        ):
+            return False
+
+        self._wake_reconnect_pending = True
+        self.notify(message, title="Textchat")
+        self.reconnect_after_wake(self.active_server_id)
+        return True
+
+    def _start_wake_monitor(self) -> None:
+        """Start one sleep-gap monitor for both first-run and later connects."""
+        self._last_awake_wall_time = time.time()
+        if not self._wake_monitor_started:
+            self.set_interval(5, self._detect_wake)
+            self._wake_monitor_started = True
+
+    @work(group="wake-reconnect", exclusive=True, exit_on_error=False)
+    async def reconnect_after_wake(self, server_id) -> None:
+        try:
+            await self.connect_saved_server(server_id)
+        finally:
+            self._wake_reconnect_pending = False
+
     async def _reset_connection_view(self) -> None:
         """Remove the previous server's tabs and member tree before reconnecting."""
         try:
@@ -515,6 +600,7 @@ class TextChat(App):
 
         self.irc_client = self._make_irc_client(server, channels)
         self.irc_client.start_event_loop()
+        self._start_wake_monitor()
 
     async def _handle_chat_command(self, message) -> None:
         """Dispatch commands handled by Textchat itself."""
@@ -531,6 +617,15 @@ class TextChat(App):
             await self.irc_client._intercept_whois(message)
         elif command == "/close":
             await self.action_close_current_tab()
+        elif command == "/kick":
+            # Support both an IRC-style explicit target and the convenient
+            # tab-aware form used elsewhere in Textchat:
+            #   /kick #channel nickname [reason]
+            #   /kick nickname [reason]
+            if argument.lstrip().startswith(("#", "&", "!", "+")):
+                await self.irc_client._intercept_kick(message)
+            else:
+                await self.kick_from_current_channel(argument)
 
     async def _send_plain_message(self, message) -> None:
         """Send and render a non-command message in the active tab."""
@@ -544,10 +639,16 @@ class TextChat(App):
         if self.tab is None or not self.tab.name:
             return
 
-        self.irc_client.connection.privmsg(
-            self.tab.name.replace("@", "").replace("+", ""),
-            message,
-        )
+        try:
+            self.irc_client.connection.privmsg(
+                self.tab.name.replace("@", "").replace("+", ""),
+                message,
+            )
+        except ServerNotConnectedError:
+            self._request_reconnect(
+                "Connection lost. Reconnecting… Message was not sent."
+            )
+            return
         now = datetime.now().strftime("%H:%M")
         self._append_message(
             self.tab,

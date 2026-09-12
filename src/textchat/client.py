@@ -180,6 +180,21 @@ class IRCApp(SimpleIRCClient):
         time.sleep(7)
         self.app.notify("Connected!")
 
+    async def _intercept_kick(self, message):
+        command, _, rest = message.partition(" ")
+        if command != "/kick":
+            return False
+
+        parts = rest.split(maxsplit=2)
+        if len(parts) < 2:
+            self.app.notify("Usage: /kick <channel> <nickname> [reason]")
+            return True
+
+        channel, nickname = parts[:2]
+        reason = parts[2] if len(parts) == 3 else ""
+        self.connection.kick(channel, nickname.lstrip("@+%&~"), reason)
+        return True
+
     async def _intercept_join(self, message):
         if message.startswith("/join"):
             channel = message.split()[1]
@@ -442,6 +457,27 @@ class IRCApp(SimpleIRCClient):
 
     def on_part(self, connection, event):
         self._remove_user_from_channel(event.target, event.source.nick)
+
+    def on_kick(self, connection, event):
+        """Show a kick in the channel and update its member list."""
+        if not event.arguments:
+            return
+
+        nickname = event.arguments[0]
+        reason = event.arguments[1] if len(event.arguments) > 1 else ""
+        kicker = event.source.nick if event.source else "Server"
+        message = f"was kicked by {kicker}"
+        if reason:
+            message += f" — {reason}"
+
+        self._remove_user_from_channel(event.target, nickname)
+        self.app.handle_irc_message(
+            datetime.now().strftime("%H:%M"),
+            event.target,
+            nickname,
+            message,
+            "italics",
+        )
 
     def on_quit(self, connection, event):
         nickname = event.source.nick
