@@ -12,6 +12,8 @@ from textchat.client import WhoisInfo
 from textchat.db.base import create_table
 from textchat.db.db import ChannelOperations
 from textchat.screens.irc import IRCScreen
+from textchat.screens.kicked import KickedScreen
+from textchat.screens.networks import NetworkPickerScreen
 from textchat.screens.quit import QuitScreen
 from textchat.screens.settings import SettingsScreen
 from textchat.screens.whois import WhoisScreen
@@ -130,22 +132,34 @@ class TextChat(App):
         self._last_awake_wall_time = time.time()
         self._wake_reconnect_pending = False
         self._wake_monitor_started = False
-        self.action_list = ["/join", "/part", "/msg", "/whois", "/close", "/kick"]
+        self.action_list = [
+            "/join",
+            "/part",
+            "/msg",
+            "/whois",
+            "/close",
+            "/kick",
+            "/nick",
+        ]
         self.channel_ops = ChannelOperations()
         self.irc_screen = self.get_screen("irc", IRCScreen)
 
-        server = await self.channel_ops.get_server_info()
-
-        if server is None:
+        servers = await self.channel_ops.get_servers()
+        if not servers:
             self.switch_mode("settings")
             return
 
-        await self.connect_saved_server(server.id)
+        await self.show_network_picker()
 
     @on(ChatInput.Changed)
     def save_active_tab_draft(self, event: ChatInput.Changed) -> None:
         """Keep the current input text with its active channel or PM tab."""
-        tabbed = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
+        try:
+            tabbed = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
+        except NoMatches:
+            # Textual can emit a final Changed event while the IRC screen is
+            # being removed during shutdown, after its tab container is gone.
+            return
         pane = tabbed.active_pane
 
         if pane is not None and pane.id is not None:
@@ -408,6 +422,21 @@ class TextChat(App):
     def action_open_settings(self) -> None:
         self.push_screen(SettingsScreen())
 
+    async def show_network_picker(self) -> None:
+        """Show saved profiles and connect only after the user selects one."""
+        servers = await self.channel_ops.get_servers()
+        if not servers:
+            self.switch_mode("settings")
+            return
+
+        def connect_selected(selection: int | str) -> None:
+            if selection == "settings":
+                self.action_open_settings()
+            elif isinstance(selection, int):
+                self.call_after_refresh(self.connect_saved_server, selection)
+
+        self.push_screen(NetworkPickerScreen(servers), connect_selected)
+
     async def action_close_current_tab(self) -> None:
         """Hide the active tab without parting the ZNC channel."""
         tabbed_content = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
@@ -483,13 +512,9 @@ class TextChat(App):
                 await self.pop_screen()
             return
 
-        server = await self.channel_ops.get_server_info()
-
-        if server is None:
-            self.switch_mode("settings")
-            return
-
-        await self.connect_saved_server(server.id)
+        if self.current_mode == "settings":
+            self.switch_mode("irc")
+        await self.show_network_picker()
 
     async def kick_from_current_channel(self, argument: str) -> None:
         tabbed = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
@@ -510,6 +535,24 @@ class TextChat(App):
             nickname.lstrip("@+%&~"),
             reason.strip(),
         )
+
+    @work(group="kicked-channel", exclusive=False, exit_on_error=False)
+    async def handle_local_kick(
+        self,
+        channel: str,
+        kicker: str,
+        reason: str,
+    ) -> None:
+        """Offer a local user a deliberate way to rejoin a kicked channel."""
+
+        def handle_choice(rejoin: bool) -> None:
+            if not rejoin:
+                return
+
+            self.notify(f"Rejoining ({channel})…", title="Textchat")
+            self.irc_client.connection.join(channel)
+
+        self.push_screen(KickedScreen(channel, kicker, reason), handle_choice)
 
     def _detect_wake(self) -> None:
         """Reconnect after the event loop resumes from computer sleep."""
@@ -605,27 +648,32 @@ class TextChat(App):
     async def _handle_chat_command(self, message) -> None:
         """Dispatch commands handled by Textchat itself."""
         command, _, argument = message.partition(" ")
+        match command:
+            case "/join":
+                await self.irc_client._intercept_join(message)
 
-        if command == "/join":
-            await self.irc_client._intercept_join(message)
-        elif command == "/part":
-            if argument.strip():
-                await self.irc_client._intercept_part(message)
-            else:
-                await self.part_current_channel()
-        elif command == "/whois":
-            await self.irc_client._intercept_whois(message)
-        elif command == "/close":
-            await self.action_close_current_tab()
-        elif command == "/kick":
-            # Support both an IRC-style explicit target and the convenient
-            # tab-aware form used elsewhere in Textchat:
-            #   /kick #channel nickname [reason]
-            #   /kick nickname [reason]
-            if argument.lstrip().startswith(("#", "&", "!", "+")):
-                await self.irc_client._intercept_kick(message)
-            else:
-                await self.kick_from_current_channel(argument)
+            case "/part":
+                if argument.strip():
+                    await self.irc_client._intercept_part(message)
+                else:
+                    await self.part_current_channel()
+
+            case "/whois":
+                await self.irc_client._intercept_whois(message)
+
+            case "/close":
+                await self.action_close_current_tab()
+
+            case "/kick":
+                if argument.lstrip().startswith(("#", "&", "!", "+")):
+                    await self.irc_client._intercept_kick(message)
+                else:
+                    await self.kick_from_current_channel(argument)
+            case "/nick":
+                await self.irc_client._intercept_nick(message)
+
+            case _:
+                self.notify(f"Unknown command: {command}")
 
     async def _send_plain_message(self, message) -> None:
         """Send and render a non-command message in the active tab."""
