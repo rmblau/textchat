@@ -43,11 +43,11 @@ QuitScreen {
     align: center middle;
 }
 
-WhoisScreen, ContextMenu, PrivateMessageScreen {
+WhoisScreen, PrivateMessageScreen {
     align: center middle;
 }
 
-#whois-dialog, #context-menu, #private-message-dialog {
+#whois-dialog, #private-message-dialog {
     width: 60;
     height: auto;
     max-height: 80%;
@@ -57,7 +57,7 @@ WhoisScreen, ContextMenu, PrivateMessageScreen {
     content-align: left top;
 }
 
-#whois-title, #context-title, #private-message-title {
+#whois-title, #private-message-title {
     margin-bottom: 1;
     color: $accent;
     text-style: bold;

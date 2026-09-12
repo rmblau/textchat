@@ -8,7 +8,6 @@ from textchat.client import IRCApp
 from textchat.client import WhoisInfo
 from textchat.db.base import create_table
 from textchat.db.db import ChannelOperations
-from textchat.screens.context_menu import ContextTarget
 from textchat.screens.irc import IRCScreen
 from textchat.screens.quit import QuitScreen
 from textchat.screens.settings import SettingsScreen
@@ -16,6 +15,7 @@ from textchat.screens.whois import WhoisScreen
 from textchat.utils.channels import load_channels
 from textchat.utils.nickcomplete import NickCompletion
 from textchat.widgets.channeltree import ChannelTree
+from textchat.widgets.chatmessage import ChatMessage
 from textchat.widgets.input import ChatInput
 from textual import on
 from textual import work
@@ -307,6 +307,11 @@ class TextChat(App):
                 prefix.start("nickname"),
                 prefix.end("nickname"),
             )
+            text.stylize(
+                f"link pm:{nickname}",
+                prefix.start("nickname"),
+                prefix.end("nickname"),
+            )
             text.stylize("dim", prefix.end("nickname"), prefix.end())
 
         for match in cls.URL_PATTERN.finditer(message):
@@ -323,7 +328,7 @@ class TextChat(App):
 
     @classmethod
     def _message_label(cls, message, classes=None):
-        return Label(cls._message_text(message), markup=False, classes=classes)
+        return ChatMessage(cls._message_text(message), markup=False, classes=classes)
 
     def _append_message(self, pane, message_label):
         """Mount a message and follow it once Textual has refreshed the layout."""
@@ -417,28 +422,6 @@ class TextChat(App):
     @work(group="whois-results", exclusive=False, exit_on_error=False)
     async def handle_whois_result(self, info: WhoisInfo) -> None:
         await self.push_screen(WhoisScreen(info))
-
-    def handle_context_action(
-        self,
-        target: ContextTarget,
-        action: str | None,
-    ) -> None:
-        if action is None:
-            return
-
-        if target.kind == "user":
-            if action == "message":
-                self.open_private_message(target.value)
-            elif action == "whois":
-                self.request_whois(target.value)
-            return
-
-        if action == "open":
-            self.open_channel_tab(target.value)
-        elif action == "close":
-            self.close_channel_tab(target.value)
-        elif action == "part":
-            self.part_channel(target.value)
 
     async def action_return_home(self) -> None:
         channels = await load_channels()
