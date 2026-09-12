@@ -425,6 +425,7 @@ class IRCApp(SimpleIRCClient):
                 sender,
                 message,
                 classes,
+                mark_unread=False,
             )
         elif self.nickname != sender:
             self.app.handle_irc_message(
@@ -433,6 +434,7 @@ class IRCApp(SimpleIRCClient):
                 sender,
                 message,
                 classes,
+                mark_unread=False,
             )
 
     def on_part(self, connection, event):

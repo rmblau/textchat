@@ -16,6 +16,33 @@ Label {
     height: auto;
 }
 
+SettingsScreen {
+    align: center top;
+}
+
+#settings-form {
+    width: 1fr;
+    max-width: 72;
+    height: auto;
+    padding: 1 2;
+}
+
+.settings-title {
+    margin-bottom: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+.settings-help {
+    margin-bottom: 1;
+    color: $text-muted;
+}
+
+.settings-label {
+    margin-top: 1;
+    color: $text-muted;
+}
+
 TabbedContent {
     width: 1fr;
     height: 1fr;

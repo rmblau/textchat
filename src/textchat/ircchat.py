@@ -3,6 +3,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from rich.style import Style
 from rich.text import Text
 from textchat.client import IRCApp
 from textchat.client import WhoisInfo
@@ -120,6 +121,7 @@ class TextChat(App):
         # the same channel-scoped structure.
         self.channel_users = {}
         self.node_list = {}
+        self.unread_tabs = set()
         self.action_list = ["/join", "/part", "/msg", "/whois", "/close"]
         self.channel_ops = ChannelOperations()
         self.irc_screen = self.get_screen("irc", IRCScreen)
@@ -308,7 +310,7 @@ class TextChat(App):
                 prefix.end("nickname"),
             )
             text.stylize(
-                f"link pm:{nickname}",
+                Style.from_meta({"pm": nickname}),
                 prefix.start("nickname"),
                 prefix.end("nickname"),
             )
@@ -339,6 +341,36 @@ class TextChat(App):
             animate=False,
             force=True,
         )
+
+    def _set_tab_unread(self, pane, unread: bool) -> None:
+        """Apply or remove the unread marker without changing the pane name."""
+        if pane.id is None or pane.name is None:
+            return
+
+        tabbed_content = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
+        try:
+            tab = tabbed_content.get_tab(pane)
+        except NoMatches:
+            return
+
+        if unread:
+            self.unread_tabs.add(pane.id)
+        else:
+            self.unread_tabs.discard(pane.id)
+
+        label = f"* {pane.name}" if unread else pane.name
+        if tab.label_text != label:
+            tab.label = label
+
+    def _mark_tab_unread_if_inactive(self, pane) -> None:
+        tabbed_content = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
+        if tabbed_content.active_pane is not pane:
+            self._set_tab_unread(pane, True)
+
+    @on(TabbedContent.TabActivated)
+    def clear_active_tab_unread(self, event: TabbedContent.TabActivated) -> None:
+        """Read a tab as soon as the user switches to it."""
+        self._set_tab_unread(event.pane, False)
 
     def action_request_quit(self) -> None:
         def check_quit(quit: bool) -> None:
@@ -503,7 +535,15 @@ class TextChat(App):
 
         return self.channel_list
 
-    def irc_message(self, time, channel, sender, message, classes):
+    def irc_message(
+        self,
+        time,
+        channel,
+        sender,
+        message,
+        classes,
+        mark_unread=True,
+    ):
         self.tab = (
             self.get_screen("irc", IRCScreen)
             .query_one(TabbedContent)
@@ -528,6 +568,9 @@ class TextChat(App):
                 ),
             )
 
+        if mark_unread:
+            self._mark_tab_unread_if_inactive(self.tab)
+
     def received_private_message(self, time, sender, message, classes):
         tabbed_content = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
 
@@ -544,6 +587,8 @@ class TextChat(App):
             active_pane = tabbed_content.active_pane
             if active_pane != self.tab:
                 self.notify(f"<{sender}> {message}", title="Private Message")
+
+            self._mark_tab_unread_if_inactive(self.tab)
 
         except Exception:
             tabbed_content.add_pane(
@@ -563,6 +608,7 @@ class TextChat(App):
                     classes=classes,
                 ),
             )
+            self._mark_tab_unread_if_inactive(self.tab)
             self.notify(f"<{sender}> {message}", title="Private Message")
 
     def add_to_tree(self, channel, user_list):
@@ -596,12 +642,27 @@ class TextChat(App):
         self.channel_users.pop(channel_key, None)
 
     @work(group="irc-messages", exclusive=False, exit_on_error=False)
-    async def handle_irc_message(self, time, channel, sender, message, classes):
+    async def handle_irc_message(
+        self,
+        time,
+        channel,
+        sender,
+        message,
+        classes,
+        mark_unread=True,
+    ):
         worker = get_current_worker()
 
         if not worker.is_cancelled:
             await self._ensure_channel_tab(channel)
-            self.irc_message(time, channel, sender, message, classes)
+            self.irc_message(
+                time,
+                channel,
+                sender,
+                message,
+                classes,
+                mark_unread,
+            )
 
     @work(
         group="irc-private-messages",
