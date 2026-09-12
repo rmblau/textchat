@@ -23,8 +23,14 @@ SettingsScreen {
 #settings-form {
     width: 1fr;
     max-width: 72;
-    height: auto;
+    height: 1fr;
     padding: 1 2;
+    overflow-y: auto;
+}
+
+#profile-actions {
+    height: auto;
+    margin-top: 1;
 }
 
 .settings-title {

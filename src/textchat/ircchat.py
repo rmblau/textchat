@@ -122,23 +122,18 @@ class TextChat(App):
         self.channel_users = {}
         self.node_list = {}
         self.unread_tabs = set()
+        self.active_server_id = None
         self.action_list = ["/join", "/part", "/msg", "/whois", "/close"]
         self.channel_ops = ChannelOperations()
         self.irc_screen = self.get_screen("irc", IRCScreen)
 
         server = await self.channel_ops.get_server_info()
-        existing_channels = await load_channels()
 
         if server is None:
             self.switch_mode("settings")
             return
 
-        await self.push_screen("irc")
-        for channel in existing_channels:
-            await self._ensure_channel_tab(channel)
-
-        self.irc_client = self._make_irc_client(server, existing_channels)
-        self.irc_client.start_event_loop()
+        await self.connect_saved_server(server.id)
 
     async def action_move_tab_left(self) -> None:
         await self._move_active_tab(-1)
@@ -179,7 +174,7 @@ class TextChat(App):
     def _make_irc_client(self, server, channels):
         return IRCApp(
             self,
-            server_list=[(server.server_address, server.port)],
+            server_list=[(server.connection_address, server.port)],
             nickname=server.nickname,
             realname=server.nickname,
             ident_password=server.password,
@@ -456,22 +451,70 @@ class TextChat(App):
         await self.push_screen(WhoisScreen(info))
 
     async def action_return_home(self) -> None:
-        channels = await load_channels()
+        """Return from settings without replacing an active IRC connection."""
+        if hasattr(self, "irc_client"):
+            if isinstance(self.screen, SettingsScreen):
+                await self.pop_screen()
+            return
+
         server = await self.channel_ops.get_server_info()
 
         if server is None:
             self.switch_mode("settings")
             return
 
-        await self.push_screen("irc")
+        await self.connect_saved_server(server.id)
+
+    async def _reset_connection_view(self) -> None:
+        """Remove the previous server's tabs and member tree before reconnecting."""
+        try:
+            irc_screen = self.get_screen("irc", IRCScreen)
+            tabbed_content = irc_screen.query_one(TabbedContent)
+            tree = irc_screen.query_one(ChannelTree)
+        except NoMatches:
+            return
+
+        switcher = tabbed_content.get_child_by_type(ContentSwitcher)
+        panes = [pane for pane in switcher.children if isinstance(pane, TabPane)]
+        for pane in panes:
+            if pane.id is not None:
+                await tabbed_content.remove_pane(pane.id)
+
+        tree.clear()
+        self.channel_users.clear()
+        self.node_list.clear()
+        self.unread_tabs.clear()
+        self.channel_list = None
+
+    async def connect_saved_server(self, server_id) -> None:
+        """Make one saved profile active and reconnect the single IRC client."""
+        server = await self.channel_ops.get_server_info(server_id)
+        if server is None:
+            self.notify("That server profile no longer exists.")
+            return
+
+        await self.channel_ops.set_active_server(server.id)
+        self.active_server_id = server.id
+
+        try:
+            self.irc_client.stop()
+        except AttributeError:
+            pass
+
+        irc_screen = self.get_screen("irc", IRCScreen)
+        if self.screen is not irc_screen:
+            # Always return to the installed IRC screen. Switching modes here
+            # would create a second, empty IRCScreen while channel tabs are
+            # added to this installed instance.
+            await self.push_screen("irc")
+
+        await self._reset_connection_view()
+        channels = await load_channels(server.id)
         for channel in channels:
             await self._ensure_channel_tab(channel)
 
-        try:
-            self.irc_client = self._make_irc_client(server, channels)
-            self.irc_client.start_event_loop()
-        except Exception as error:
-            print(error)
+        self.irc_client = self._make_irc_client(server, channels)
+        self.irc_client.start_event_loop()
 
     async def _handle_chat_command(self, message) -> None:
         """Dispatch commands handled by Textchat itself."""

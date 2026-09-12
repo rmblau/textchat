@@ -189,7 +189,10 @@ class IRCApp(SimpleIRCClient):
                 self.channels.append(channel)
 
                 channel_ops = ChannelOperations()
-                await channel_ops.add_channel_to_list(channel)
+                await channel_ops.add_channel_to_list(
+                    channel,
+                    self.app.active_server_id,
+                )
                 await self.app._ensure_channel_tab(channel)
             else:
                 self.app.notify(f"Already in {channel}!")
@@ -304,7 +307,7 @@ class IRCApp(SimpleIRCClient):
         self._names_in_progress.discard(channel_key)
 
         channel_ops = ChannelOperations()
-        await channel_ops.delete_channel(channel)
+        await channel_ops.delete_channel(channel, self.app.active_server_id)
         await self.app._close_channel_tab(channel)
         self.app.remove_from_tree(channel)
 
