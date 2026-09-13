@@ -195,6 +195,32 @@ class IRCApp(SimpleIRCClient):
         self.connection.kick(channel, nickname.lstrip("@+%&~"), reason)
         return True
 
+    async def _intercept_invite(self, message):
+        command, _, rest = message.partition(" ")
+        if command != "/invite":
+            return False
+
+        parts = rest.split(maxsplit=1)
+        if len(parts) < 2:
+            self.app.notify("Usage: /invite <nickname> <channel>")
+            return True
+
+        nickname, channel = parts
+        self.connection.invite(nickname.lstrip("@+%&~"), channel)
+        return True
+
+    async def _intercept_nick(self, message):
+        command, _, new_nick = message.partition(" ")
+        if command != "/nick":
+            return False
+
+        if not new_nick.strip():
+            self.app.notify("Usage: /nick <new_nickname>")
+            return True
+
+        self.connection.nick(new_nick.strip())
+        return True
+
     async def _intercept_join(self, message):
         if message.startswith("/join"):
             channel = message.split()[1]
@@ -458,6 +484,62 @@ class IRCApp(SimpleIRCClient):
     def on_part(self, connection, event):
         self._remove_user_from_channel(event.target, event.source.nick)
 
+    def on_currenttopic(self, connection, event):
+        """Receive the topic sent by the server after joining a channel."""
+        if len(event.arguments) >= 2:
+            channel, topic = event.arguments[:2]
+            self.app.update_channel_topic(channel, topic)
+
+    def on_notopic(self, connection, event):
+        """Record that a joined channel has no topic."""
+        if event.arguments:
+            self.app.update_channel_topic(event.arguments[0], "")
+
+    def on_topic(self, connection, event):
+        """Receive a topic change announced by a channel member."""
+        if event.target and event.arguments:
+            self.app.update_channel_topic(event.target, event.arguments[0])
+
+    def on_nick(self, connection, event):
+        old_nickname = event.source.nick
+        new_nickname = event.target
+
+        if not old_nickname or not new_nickname:
+            return
+
+        for channel_key, users in tuple(self.channel_users.items()):
+            renamed = set()
+            changed = False
+
+            for member in users:
+                if self._nickname_key(member) == self._nickname_key(old_nickname):
+                    # Keep status prefixes such as @, +, %, and ~.
+                    prefix_length = len(member) - len(member.lstrip("@+%&~"))
+                    renamed.add(member[:prefix_length] + new_nickname)
+                    changed = True
+                else:
+                    renamed.add(member)
+
+            if not changed:
+                continue
+
+            self.channel_users[channel_key] = renamed
+            channel = self.channel_names[channel_key]
+            self._publish_channel_users(channel)
+
+            self.app.handle_irc_message(
+                datetime.now().strftime("%H:%M"),
+                channel,
+                old_nickname,
+                f"is now known as {new_nickname}",
+                "italics",
+                mark_unread=False,
+            )
+
+        # Keep Textchat's locally stored nickname current if this was us.
+        if self._nickname_key(old_nickname) == self._nickname_key(self.nickname):
+            self.nickname = new_nickname
+
     def on_kick(self, connection, event):
         """Show a kick in the channel and update its member list."""
         if not event.arguments:
@@ -469,6 +551,7 @@ class IRCApp(SimpleIRCClient):
         message = f"was kicked by {kicker}"
         if reason:
             message += f" — {reason}"
+        message += f" ({event.target})"
 
         self._remove_user_from_channel(event.target, nickname)
         self.app.handle_irc_message(
@@ -478,6 +561,8 @@ class IRCApp(SimpleIRCClient):
             message,
             "italics",
         )
+        if self._nickname_key(nickname) == self._nickname_key(self.nickname):
+            self.app.handle_local_kick(event.target, kicker, reason)
 
     def on_quit(self, connection, event):
         nickname = event.source.nick

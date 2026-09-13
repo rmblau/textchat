@@ -1,15 +1,21 @@
 [project]
 name = "textchat"
-version = "0.1.10"
+version = "0.1.11"
+description = "A terminal IRC client built with Textual, with multi-network and ZNC support."
+readme = { file = "README.md", content-type = "text/markdown" }
 authors = [
     { name = "Matthew Blau", email = "mrb1105@gmail.com" },
 ]
 dependencies = ["textual >=0.76.0", "irc >=20.4.3", "textual-autocomplete >=2.1.0b0","SQLAlchemy >=2.0.30", "aiosqlite >=0.20.0", "greenlet >= 3.5.5"]
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
 ]
+
+[project.urls]
+Homepage = "https://github.com/rmblau/textchat"
+Source = "https://github.com/rmblau/textchat"
 
 [build-system]
 requires = ["setuptools>=61.0"]
