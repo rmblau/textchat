@@ -27,6 +27,7 @@ from textual import work
 from textual.app import App
 from textual.css.query import NoMatches
 from textual.widgets import Label
+from textual.widgets import Static
 from textual.widgets import TabbedContent
 from textual.widgets import TabPane
 from textual.widgets._content_switcher import ContentSwitcher
@@ -125,6 +126,7 @@ class TextChat(App):
         # not another. Keep the list that powers the sidebar and completion in
         # the same channel-scoped structure.
         self.channel_users = {}
+        self.channel_topics = {}
         self.node_list = {}
         self.tab_drafts = {}
         self.unread_tabs = set()
@@ -392,10 +394,44 @@ class TextChat(App):
         if tabbed_content.active_pane is not pane:
             self._set_tab_unread(pane, True)
 
+    def update_topic_bar(self, channel: str | None) -> None:
+        """Render the active channel's cached IRC topic below the sidebar."""
+        try:
+            topic_bar = self.get_screen("irc", IRCScreen).query_one(
+                "#topic-bar", Static
+            )
+        except NoMatches:
+            return
+
+        if not channel or channel[0] not in "#&!+":
+            topic_bar.update("No channel selected")
+            return
+
+        topic = self.channel_topics.get(channel.casefold(), "")
+        topic_bar.update(f"({channel}) {topic or 'No topic set'}")
+
+    @work(group="channel-topics", exclusive=False, exit_on_error=False)
+    async def update_channel_topic(self, channel: str, topic: str) -> None:
+        """Cache a topic received from IRC and refresh it if it is visible."""
+        self.channel_topics[channel.casefold()] = topic
+
+        try:
+            tabbed = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
+        except NoMatches:
+            return
+        active_pane = tabbed.active_pane
+        if (
+            active_pane is not None
+            and active_pane.name is not None
+            and active_pane.name.casefold() == channel.casefold()
+        ):
+            self.update_topic_bar(channel)
+
     @on(TabbedContent.TabActivated)
     def clear_active_tab_unread(self, event: TabbedContent.TabActivated) -> None:
         """Read a tab as soon as the user switches to it."""
         self._set_tab_unread(event.pane, False)
+        self.update_topic_bar(event.pane.name)
         chat_input = self.get_screen("irc", IRCScreen).query_one(ChatInput)
         draft = self.tab_drafts.get(event.pane.id, "")
         chat_input.value = draft
@@ -610,6 +646,7 @@ class TextChat(App):
 
         tree.clear()
         self.channel_users.clear()
+        self.channel_topics.clear()
         self.node_list.clear()
         self.unread_tabs.clear()
         self.channel_list = None
@@ -832,6 +869,7 @@ class TextChat(App):
         if node is not None:
             node.remove()
         self.channel_users.pop(channel_key, None)
+        self.channel_topics.pop(channel_key, None)
 
     @work(group="irc-messages", exclusive=False, exit_on_error=False)
     async def handle_irc_message(

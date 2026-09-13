@@ -62,12 +62,32 @@ TabbedContent {
 Toast {
     padding: 3;
 }
-#sidebar {
+#sidebar-column {
     width: 25%;
     min-width: 16;
     max-width: 30;
     height: 100%;
+}
+
+#sidebar {
+    width: 1fr;
+    height: 1fr;
     color: green;
+}
+
+#topic-container {
+    dock: top;
+    width: 1fr;
+    height: auto;
+    margin-top: 2;
+}
+
+#topic-bar {
+    width: 1fr;
+    height: auto;
+    max-height: 5;
+    color: $text-muted;
+    overflow-y: auto;
 }
 .italics {
     text-style: italic;

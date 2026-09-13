@@ -1,6 +1,8 @@
 [project]
 name = "textchat"
 version = "0.1.10"
+description = "A terminal IRC client built with Textual, with multi-network and ZNC support."
+readme = { file = "README.md", content-type = "text/markdown" }
 authors = [
     { name = "Matthew Blau", email = "mrb1105@gmail.com" },
 ]
@@ -10,6 +12,10 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
 ]
+
+[project.urls]
+Homepage = "https://github.com/rmblau/textchat"
+Source = "https://github.com/rmblau/textchat"
 
 [build-system]
 requires = ["setuptools>=61.0"]

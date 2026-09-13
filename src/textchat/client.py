@@ -484,6 +484,22 @@ class IRCApp(SimpleIRCClient):
     def on_part(self, connection, event):
         self._remove_user_from_channel(event.target, event.source.nick)
 
+    def on_currenttopic(self, connection, event):
+        """Receive the topic sent by the server after joining a channel."""
+        if len(event.arguments) >= 2:
+            channel, topic = event.arguments[:2]
+            self.app.update_channel_topic(channel, topic)
+
+    def on_notopic(self, connection, event):
+        """Record that a joined channel has no topic."""
+        if event.arguments:
+            self.app.update_channel_topic(event.arguments[0], "")
+
+    def on_topic(self, connection, event):
+        """Receive a topic change announced by a channel member."""
+        if event.target and event.arguments:
+            self.app.update_channel_topic(event.target, event.arguments[0])
+
     def on_nick(self, connection, event):
         old_nickname = event.source.nick
         new_nickname = event.target

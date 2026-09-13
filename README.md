@@ -1,13 +1,30 @@
-# What is Textchat?
-Textchat is a TUI made with Textual and the [irc](https://github.com/jaraco/irc) library. It is designed to work with a single server.
+# Textchat
 
+Textchat is a terminal IRC client built with [Textual](https://textual.textualize.io/) and [python-irc](https://github.com/jaraco/irc). It supports multiple saved IRC or ZNC profiles, channel tabs, private messages, member lists, nick completion, topics, and common IRC commands.
 
-## How to Use
-Textchat is available on pypi and can be installed with `pip install textchat`. The only platform confirmed to be working right now is Linux. Alternatively, you can clone the repo and install with `pip install -e .`
+## Install
 
+```bash
+python -m pip install textchat
+textchat
+```
 
-## Screenshots
-![libera](/assets/libera.png)
+On first launch, add a server or ZNC profile. On later launches, Textchat shows a network picker rather than connecting automatically.
 
---------
-.
+## Highlights
+
+- Multiple saved IRC and ZNC network profiles
+- Optional TLS and SASL authentication
+- Channel and private-message tabs
+- Channel-scoped member lists and nick completion
+- Clickable nicknames, WHOIS, and private messages
+- IRC topics, unread tab markers, chat colours, and URL detection
+- Commands including `/join`, `/part`, `/msg`, `/whois`, `/nick`, and `/kick`
+
+## Development
+
+```bash
+git clone https://github.com/rmblau/textchat.git
+cd textchat
+python -m pip install -e .
+```
