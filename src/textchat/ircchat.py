@@ -1,5 +1,6 @@
 import hashlib
 import re
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +12,7 @@ from textchat.client import IRCApp
 from textchat.client import WhoisInfo
 from textchat.db.base import create_table
 from textchat.db.db import ChannelOperations
+from textchat.notifications import send_desktop_notification
 from textchat.screens.irc import IRCScreen
 from textchat.screens.kicked import KickedScreen
 from textchat.screens.networks import NetworkPickerScreen
@@ -764,6 +766,19 @@ class TextChat(App):
 
         return self.channel_list
 
+    def _notify(self, message: str, title: str) -> None:
+        """Show Textual's notice and, on macOS, a native desktop notification."""
+        self.notify(message, title=title)
+        self.send_macos_notification(title, message)
+
+    @work(
+        group="macos-notifications",
+        exclusive=False,
+        exit_on_error=False,
+    )
+    async def send_macos_notification(self, title: str, message: str) -> None:
+        await send_desktop_notification(title, message)
+
     def irc_message(
         self,
         time,
@@ -780,7 +795,7 @@ class TextChat(App):
         )
 
         if self.irc_client.nickname in message:
-            self.notify(f"{time} <{sender}> {message}", title=channel)
+            self._notify(f"{time} <{sender}> {message}", title=channel)
             self._append_message(
                 self.tab,
                 self._message_label(
@@ -815,7 +830,7 @@ class TextChat(App):
 
             active_pane = tabbed_content.active_pane
             if active_pane != self.tab:
-                self.notify(f"<{sender}> {message}", title="Private Message")
+                self._notify(f"<{sender}> {message}", title="Private Message")
 
             self._mark_tab_unread_if_inactive(self.tab)
 
@@ -838,7 +853,7 @@ class TextChat(App):
                 ),
             )
             self._mark_tab_unread_if_inactive(self.tab)
-            self.notify(f"<{sender}> {message}", title="Private Message")
+            self._notify(f"<{sender}> {message}", title="Private Message")
 
     def add_to_tree(self, channel, user_list):
         """Render one channel's current member list in the sidebar."""
@@ -912,9 +927,30 @@ class TextChat(App):
             pass
 
 
+def _macos_event_loop():
+    """Create an asyncio loop which can receive macOS notification callbacks."""
+    from ctypes import cdll
+    from ctypes import util
+
+    appkit = util.find_library("AppKit")
+    if appkit is None:
+        raise RuntimeError("Unable to load macOS AppKit framework")
+
+    # Rubicon resolves NSEvent during import, so AppKit must be loaded first.
+    cdll.LoadLibrary(appkit)
+
+    from rubicon.objc.eventloop import RubiconEventLoop
+
+    return RubiconEventLoop()
+
+
 def main():
     app = TextChat()
-    app.run()
+
+    if sys.platform == "darwin":
+        app.run(loop=_macos_event_loop())
+    else:
+        app.run()
 
 
 if __name__ == "__main__":

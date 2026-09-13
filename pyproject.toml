@@ -6,7 +6,7 @@ readme = { file = "README.md", content-type = "text/markdown" }
 authors = [
     { name = "Matthew Blau", email = "mrb1105@gmail.com" },
 ]
-dependencies = ["textual >=0.76.0", "irc >=20.4.3", "textual-autocomplete >=2.1.0b0","SQLAlchemy >=2.0.30", "aiosqlite >=0.20.0", "greenlet >= 3.5.5"]
+dependencies = ["textual >=0.76.0", "irc >=20.4.3", "textual-autocomplete >=2.1.0b0","SQLAlchemy >=2.0.30", "aiosqlite >=0.20.0", "greenlet >= 3.5.5", "desktop-notifier>=6.2.0; sys_platform == 'darwin'", "rubicon-objc; sys_platform == 'darwin'",]
 requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
