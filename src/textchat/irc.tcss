@@ -62,16 +62,11 @@ TabbedContent {
 Toast {
     padding: 3;
 }
-#sidebar-column {
-    width: 25%;
+#channel-sidebar, #user-sidebar {
+    width: 22%;
     min-width: 16;
     max-width: 30;
     height: 100%;
-}
-
-#sidebar {
-    width: 1fr;
-    height: 1fr;
     color: green;
 }
 

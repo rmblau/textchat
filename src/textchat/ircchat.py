@@ -24,6 +24,7 @@ from textchat.utils.nickcomplete import NickCompletion
 from textchat.widgets.channeltree import ChannelTree
 from textchat.widgets.chatmessage import ChatMessage
 from textchat.widgets.input import ChatInput
+from textchat.widgets.usertree import UserTree
 from textual import on
 from textual import work
 from textual.app import App
@@ -109,7 +110,6 @@ class TextChat(App):
         ("ctrl+s", "open_settings", "Settings"),
         ("ctrl+w", "close_current_tab", "Close tab"),
         ("ctrl+q", "request_quit", "Quit"),
-        ("ctrl+d", "toggle_dark", "Toggle dark mode"),
         ("ctrl+shift+left", "move_tab_left", "Move tab left"),
         ("ctrl+shift+right", "move_tab_right", "Move tab right"),
     ]
@@ -130,6 +130,7 @@ class TextChat(App):
         self.channel_users = {}
         self.channel_topics = {}
         self.node_list = {}
+        self.selected_sidebar_channel = None
         self.tab_drafts = {}
         self.unread_tabs = set()
         self.active_server_id = None
@@ -252,9 +253,6 @@ class TextChat(App):
     async def update_channel_tree(self, channel, user_list):
         await self._ensure_channel_tab(channel)
         self.add_to_tree(channel, user_list)
-
-    def action_toggle_dark(self) -> None:
-        self.dark = not self.dark
 
     def complete_nickname(self, chat_input):
         active_pane = self.get_screen("irc").query_one(TabbedContent).active_pane
@@ -434,6 +432,11 @@ class TextChat(App):
         """Read a tab as soon as the user switches to it."""
         self._set_tab_unread(event.pane, False)
         self.update_topic_bar(event.pane.name)
+        if event.pane.name and event.pane.name[0] in "#&!+":
+            self.select_sidebar_channel(event.pane.name, activate_tab=False)
+        else:
+            self.selected_sidebar_channel = None
+            self._clear_user_sidebar()
         chat_input = self.get_screen("irc", IRCScreen).query_one(ChatInput)
         draft = self.tab_drafts.get(event.pane.id, "")
         chat_input.value = draft
@@ -632,11 +635,12 @@ class TextChat(App):
             self._wake_reconnect_pending = False
 
     async def _reset_connection_view(self) -> None:
-        """Remove the previous server's tabs and member tree before reconnecting."""
+        """Remove the previous server's tabs and sidebars before reconnecting."""
         try:
             irc_screen = self.get_screen("irc", IRCScreen)
             tabbed_content = irc_screen.query_one(TabbedContent)
-            tree = irc_screen.query_one(ChannelTree)
+            channel_tree = irc_screen.query_one(ChannelTree)
+            user_tree = irc_screen.query_one(UserTree)
         except NoMatches:
             return
 
@@ -646,10 +650,13 @@ class TextChat(App):
             if pane.id is not None:
                 await tabbed_content.remove_pane(pane.id)
 
-        tree.clear()
+        channel_tree.clear()
+        user_tree.reset("Users")
+        user_tree.root.expand()
         self.channel_users.clear()
         self.channel_topics.clear()
         self.node_list.clear()
+        self.selected_sidebar_channel = None
         self.unread_tabs.clear()
         self.channel_list = None
 
@@ -856,27 +863,50 @@ class TextChat(App):
             self._notify(f"<{sender}> {message}", title="Private Message")
 
     def add_to_tree(self, channel, user_list):
-        """Render one channel's current member list in the sidebar."""
+        """Update one channel entry and refresh its roster if it is selected."""
         tree = self.get_screen("irc", IRCScreen).query_one(ChannelTree)
         channel_key = self._channel_key(channel)
         self.channel_users[channel_key] = set(user_list)
 
-        existing_node = self.node_list.pop(channel_key, None)
-        if existing_node is not None:
-            existing_node.remove()
+        channel_node = self.node_list.get(channel_key)
+        if channel_node is None:
+            channel_node = tree.root.add_leaf(
+                channel,
+                data={"id": channel, "kind": "channel"},
+            )
+            self.node_list[channel_key] = channel_node
+            self.channel_list = channel_node
 
-        channel_node = tree.root.add(
-            channel,
-            data={"id": channel, "kind": "channel"},
-        )
-        self.node_list[channel_key] = channel_node
-        self.channel_list = channel_node
+        if self.selected_sidebar_channel == channel_key:
+            self._render_user_sidebar(channel)
 
+    def select_sidebar_channel(self, channel, *, activate_tab=True):
+        """Show a channel's members and optionally switch to its chat tab."""
+        channel_key = self._channel_key(channel)
+        self.selected_sidebar_channel = channel_key
+        self._render_user_sidebar(channel)
+
+        if activate_tab:
+            self.open_channel_tab(channel)
+
+    def _render_user_sidebar(self, channel):
+        """Render only the users belonging to the selected channel."""
+        tree = self.get_screen("irc", IRCScreen).query_one(UserTree)
+        users = self.channel_users.get(self._channel_key(channel), set())
+
+        tree.reset(f"Users · {channel}")
         for user in sorted(
-            user_list,
+            users,
             key=lambda nickname: nickname.lstrip("@+%&~").casefold(),
         ):
-            channel_node.add_leaf(user, data={"id": user, "kind": "user"})
+            tree.root.add_leaf(user, data={"id": user, "kind": "user"})
+        tree.root.expand()
+
+    def _clear_user_sidebar(self):
+        """Clear the roster when the active chat is not an IRC channel."""
+        tree = self.get_screen("irc", IRCScreen).query_one(UserTree)
+        tree.reset("Users")
+        tree.root.expand()
 
     def remove_from_tree(self, channel):
         channel_key = self._channel_key(channel)
@@ -885,6 +915,9 @@ class TextChat(App):
             node.remove()
         self.channel_users.pop(channel_key, None)
         self.channel_topics.pop(channel_key, None)
+        if self.selected_sidebar_channel == channel_key:
+            self.selected_sidebar_channel = None
+            self._clear_user_sidebar()
 
     @work(group="irc-messages", exclusive=False, exit_on_error=False)
     async def handle_irc_message(
