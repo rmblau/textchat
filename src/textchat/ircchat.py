@@ -133,6 +133,8 @@ class TextChat(App):
         self.selected_sidebar_channel = None
         self.tab_drafts = {}
         self.unread_tabs = set()
+        self.unread_counts = {}
+        self.notification_counts = {}
         self.active_server_id = None
         self._last_awake_wall_time = time.time()
         self._wake_reconnect_pending = False
@@ -369,8 +371,8 @@ class TextChat(App):
             force=True,
         )
 
-    def _set_tab_unread(self, pane, unread: bool) -> None:
-        """Apply or remove the unread marker without changing the pane name."""
+    def _set_tab_unread(self, pane, unread: bool, notification: bool = False) -> None:
+        """Update an inactive tab's message and notification counters."""
         if pane.id is None or pane.name is None:
             return
 
@@ -382,17 +384,30 @@ class TextChat(App):
 
         if unread:
             self.unread_tabs.add(pane.id)
+            self.unread_counts[pane.id] = self.unread_counts.get(pane.id, 0) + 1
+            if notification:
+                self.notification_counts[pane.id] = (
+                    self.notification_counts.get(pane.id, 0) + 1
+                )
         else:
             self.unread_tabs.discard(pane.id)
+            self.unread_counts.pop(pane.id, None)
+            self.notification_counts.pop(pane.id, None)
 
-        label = f"* {pane.name}" if unread else pane.name
+        unread_count = self.unread_counts.get(pane.id, 0)
+        notification_count = self.notification_counts.get(pane.id, 0)
+        label = pane.name
+        if unread_count:
+            label += f" ({unread_count})"
+        if notification_count:
+            label += f"(*{notification_count})"
         if tab.label_text != label:
             tab.label = label
 
-    def _mark_tab_unread_if_inactive(self, pane) -> None:
+    def _mark_tab_unread_if_inactive(self, pane, notification: bool = False) -> None:
         tabbed_content = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
         if tabbed_content.active_pane is not pane:
-            self._set_tab_unread(pane, True)
+            self._set_tab_unread(pane, True, notification=notification)
 
     def update_topic_bar(self, channel: str | None) -> None:
         """Render the active channel's cached IRC topic below the sidebar."""
@@ -492,9 +507,13 @@ class TextChat(App):
         tabbed_content = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
         pane_id = self._channel_pane_id(channel)
         try:
-            tabbed_content.get_pane(pane_id)
+            pane = tabbed_content.get_pane(pane_id)
         except NoMatches:
             return
+        if pane.id is not None:
+            self.unread_tabs.discard(pane.id)
+            self.unread_counts.pop(pane.id, None)
+            self.notification_counts.pop(pane.id, None)
         await tabbed_content.remove_pane(pane_id)
 
     @work(group="private-messages", exclusive=False, exit_on_error=False)
@@ -658,6 +677,8 @@ class TextChat(App):
         self.node_list.clear()
         self.selected_sidebar_channel = None
         self.unread_tabs.clear()
+        self.unread_counts.clear()
+        self.notification_counts.clear()
         self.channel_list = None
 
     async def connect_saved_server(self, server_id) -> None:
@@ -801,7 +822,8 @@ class TextChat(App):
             .get_pane(channel.replace("#", "").lower())
         )
 
-        if self.irc_client.nickname in message:
+        notification = self.irc_client.nickname in message
+        if notification:
             self._notify(f"{time} <{sender}> {message}", title=channel)
             self._append_message(
                 self.tab,
@@ -820,7 +842,7 @@ class TextChat(App):
             )
 
         if mark_unread:
-            self._mark_tab_unread_if_inactive(self.tab)
+            self._mark_tab_unread_if_inactive(self.tab, notification=notification)
 
     def received_private_message(self, time, sender, message, classes):
         tabbed_content = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
@@ -839,7 +861,7 @@ class TextChat(App):
             if active_pane != self.tab:
                 self._notify(f"<{sender}> {message}", title="Private Message")
 
-            self._mark_tab_unread_if_inactive(self.tab)
+            self._mark_tab_unread_if_inactive(self.tab, notification=True)
 
         except Exception:
             tabbed_content.add_pane(
@@ -859,7 +881,7 @@ class TextChat(App):
                     classes=classes,
                 ),
             )
-            self._mark_tab_unread_if_inactive(self.tab)
+            self._mark_tab_unread_if_inactive(self.tab, notification=True)
             self._notify(f"<{sender}> {message}", title="Private Message")
 
     def add_to_tree(self, channel, user_list):

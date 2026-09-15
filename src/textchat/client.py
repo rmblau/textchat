@@ -482,7 +482,24 @@ class IRCApp(SimpleIRCClient):
             )
 
     def on_part(self, connection, event):
-        self._remove_user_from_channel(event.target, event.source.nick)
+        nickname = event.source.nick
+        if self._nickname_key(nickname) == self._nickname_key(self.nickname):
+            return
+
+        reason = event.arguments[0] if event.arguments else ""
+        message = "has left"
+        if reason:
+            message += f" — {reason}"
+
+        self._remove_user_from_channel(event.target, nickname)
+        self.app.handle_irc_message(
+            datetime.now().strftime("%H:%M"),
+            event.target,
+            nickname,
+            message,
+            "italics",
+            mark_unread=False,
+        )
 
     def on_currenttopic(self, connection, event):
         """Receive the topic sent by the server after joining a channel."""
@@ -566,9 +583,31 @@ class IRCApp(SimpleIRCClient):
 
     def on_quit(self, connection, event):
         nickname = event.source.nick
+        if self._nickname_key(nickname) == self._nickname_key(self.nickname):
+            return
+
+        reason = event.arguments[0] if event.arguments else ""
+        message = "has quit"
+        if reason:
+            message += f" — {reason}"
+
         for channel_key, channel in tuple(self.channel_names.items()):
-            if channel_key in self.channel_users:
-                self._remove_user_from_channel(channel, nickname)
+            users = self.channel_users.get(channel_key, set())
+            if not any(
+                self._nickname_key(user) == self._nickname_key(nickname)
+                for user in users
+            ):
+                continue
+
+            self._remove_user_from_channel(channel, nickname)
+            self.app.handle_irc_message(
+                datetime.now().strftime("%H:%M"),
+                channel,
+                nickname,
+                message,
+                "italics",
+                mark_unread=False,
+            )
 
     def on_disconnect(self, connection, event):
         self.stop()
