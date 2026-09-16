@@ -147,6 +147,7 @@ class TextChat(App):
             "/close",
             "/kick",
             "/nick",
+            "/me",
         ]
         self.channel_ops = ChannelOperations()
         self.irc_screen = self.get_screen("irc", IRCScreen)
@@ -739,6 +740,9 @@ class TextChat(App):
             case "/nick":
                 await self.irc_client._intercept_nick(message)
 
+            case "/me":
+                await self._send_action(argument.strip())
+
             case _:
                 self.notify(f"Unknown command: {command}")
 
@@ -768,6 +772,42 @@ class TextChat(App):
         self._append_message(
             self.tab,
             self._message_label(f"{now} <{self.irc_client.nickname}> {message}"),
+        )
+
+    async def _send_action(self, action: str) -> None:
+        """Send an IRC CTCP ACTION and show it in the active conversation."""
+        if not action:
+            self.notify("Usage: /me <action>")
+            return
+
+        try:
+            self.tab = (
+                self.get_screen("irc", IRCScreen).query_one(TabbedContent).active_pane
+            )
+        except NoMatches:
+            return
+
+        if self.tab is None or not self.tab.name:
+            return
+
+        try:
+            self.irc_client.connection.action(
+                self.tab.name.replace("@", "").replace("+", ""),
+                action,
+            )
+        except ServerNotConnectedError:
+            self._request_reconnect(
+                "Connection lost. Reconnecting… Action was not sent."
+            )
+            return
+
+        now = datetime.now().strftime("%H:%M")
+        self._append_message(
+            self.tab,
+            self._message_label(
+                f"{now} * {self.irc_client.nickname} {action}",
+                classes="italics",
+            ),
         )
 
     @on(ChatInput.Submitted)
@@ -884,6 +924,46 @@ class TextChat(App):
             self._mark_tab_unread_if_inactive(self.tab, notification=True)
             self._notify(f"<{sender}> {message}", title="Private Message")
 
+    def irc_action(self, time, channel, sender, action):
+        """Render a CTCP ACTION received in a channel."""
+        self.tab = (
+            self.get_screen("irc", IRCScreen)
+            .query_one(TabbedContent)
+            .get_pane(channel.replace("#", "").lower())
+        )
+        notification = self.irc_client.nickname in action
+        line = f"{time} * {sender} {action}"
+        if notification:
+            self._notify(line, title=channel)
+
+        self._append_message(
+            self.tab,
+            self._message_label(
+                line,
+                classes="highlight" if notification else "italics",
+            ),
+        )
+        self._mark_tab_unread_if_inactive(self.tab, notification=notification)
+
+    def received_private_action(self, time, sender, action):
+        """Render a CTCP ACTION received in a private-message tab."""
+        tabbed_content = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
+        line = f"{time} * {sender} {action}"
+
+        try:
+            self.tab = tabbed_content.get_pane(sender)
+        except NoMatches:
+            tabbed_content.add_pane(TabPane(sender, Label(), name=sender, id=sender))
+            self.tab = tabbed_content.get_pane(sender)
+
+        self._append_message(
+            self.tab,
+            self._message_label(line, classes="italics"),
+        )
+        if tabbed_content.active_pane != self.tab:
+            self._notify(line, title="Private Message")
+        self._mark_tab_unread_if_inactive(self.tab, notification=True)
+
     def add_to_tree(self, channel, user_list):
         """Update one channel entry and refresh its roster if it is selected."""
         tree = self.get_screen("irc", IRCScreen).query_one(ChannelTree)
@@ -974,6 +1054,21 @@ class TextChat(App):
 
         if not worker.is_cancelled:
             self.received_private_message(time, sender, message, classes)
+
+    @work(group="irc-actions", exclusive=False, exit_on_error=False)
+    async def handle_irc_action(self, time, channel, sender, action):
+        worker = get_current_worker()
+
+        if not worker.is_cancelled:
+            await self._ensure_channel_tab(channel)
+            self.irc_action(time, channel, sender, action)
+
+    @work(group="irc-private-actions", exclusive=False, exit_on_error=False)
+    async def handle_private_action(self, time, sender, action):
+        worker = get_current_worker()
+
+        if not worker.is_cancelled:
+            self.received_private_action(time, sender, action)
 
     async def on_shutdown(self):
         try:

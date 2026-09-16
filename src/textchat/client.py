@@ -395,28 +395,26 @@ class IRCApp(SimpleIRCClient):
                 classes=None,
             )
 
-    def on_ctcp(self, connection, event):
+    def on_action(self, connection, event):
+        """Display CTCP ACTION messages (the IRC representation of /me)."""
         sender = event.source.nick
-        message = event.arguments[1]
-        channel = event.target
+        action = event.arguments[0]
+        target = event.target
         now = datetime.now()
-        classes = "italics"
+        timestamp = f"{now.hour}:{now.minute:02d}"
 
-        if now.minute <= 9:
-            self.app.handle_irc_message(
-                f"{now.hour}:0{now.minute}",
-                channel,
+        if target and target[0] in "#&!+":
+            self.app.handle_irc_action(
+                timestamp,
+                target,
                 sender,
-                message,
-                classes,
+                action,
             )
         else:
-            self.app.handle_irc_message(
-                f"{now.hour}:{now.minute}",
-                channel,
+            self.app.handle_private_action(
+                timestamp,
                 sender,
-                message,
-                classes,
+                action,
             )
 
     def on_namreply(self, connection, event):
