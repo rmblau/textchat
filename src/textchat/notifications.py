@@ -14,8 +14,51 @@ else:
     _notifier = None
 
 
+_ITERM2_VISIBLE_WINDOW_SCRIPT = """
+ObjC.import("CoreGraphics");
+const windows = $.CGWindowListCopyWindowInfo(
+    $.kCGWindowListOptionOnScreenOnly,
+    $.kCGNullWindowID
+);
+let hasVisibleWindow = false;
+for (let index = 0; index < windows.count; index++) {
+    const window = windows.objectAtIndex(index);
+    const owner = ObjC.unwrap(window.objectForKey("kCGWindowOwnerName"));
+    if (owner === "iTerm2" || owner === "iTerm") {
+        hasVisibleWindow = true;
+        break;
+    }
+}
+hasVisibleWindow;
+"""
+
+
+def iterm2_has_visible_window() -> bool:
+    """Return whether iTerm2 owns an on-screen window.
+
+    A minimized iTerm2 window can leave iTerm2 as the frontmost application.
+    CoreGraphics omits minimized windows from its on-screen window list, which
+    lets us distinguish that state without needing Accessibility permission.
+    """
+    try:
+        result = subprocess.run(
+            ["osascript", "-l", "JavaScript", "-e", _ITERM2_VISIBLE_WINDOW_SCRIPT],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        # Preserve the previous foreground behavior if macOS cannot answer.
+        return True
+
+    if result.returncode != 0:
+        return True
+    return result.stdout.strip().lower() == "true"
+
+
 def iterm2_is_foreground() -> bool:
-    """Return True when iTerm2 is the active macOS application."""
+    """Return True when iTerm2 is active and has a visible window."""
     if _notifier is None:
         return False
 
@@ -29,10 +72,11 @@ def iterm2_is_foreground() -> bool:
     workspace = workspace_class.sharedWorkspace
     frontmost_app = workspace.frontmostApplication
 
-    return (
+    is_frontmost = (
         frontmost_app is not None
         and str(frontmost_app.bundleIdentifier) == "com.googlecode.iterm2"
     )
+    return is_frontmost and iterm2_has_visible_window()
 
 
 def activate_iterm2() -> None:
@@ -53,3 +97,10 @@ async def send_desktop_notification(title: str, message: str) -> None:
         message=message,
         on_clicked=activate_iterm2,
     )
+
+
+async def request_desktop_notification_permission() -> bool:
+    """Ask macOS for notification permission before the first IRC alert."""
+    if _notifier is None:
+        return False
+    return await _notifier.request_authorisation()

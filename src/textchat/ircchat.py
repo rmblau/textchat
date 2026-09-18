@@ -1,7 +1,6 @@
 import hashlib
 import re
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -12,6 +11,7 @@ from textchat.client import IRCApp
 from textchat.client import WhoisInfo
 from textchat.db.base import create_table
 from textchat.db.db import ChannelOperations
+from textchat.notifications import request_desktop_notification_permission
 from textchat.notifications import send_desktop_notification
 from textchat.screens.irc import IRCScreen
 from textchat.screens.kicked import KickedScreen
@@ -98,8 +98,6 @@ class TextChat(App):
         "#d14f6f",
         "#f5364d",
     )
-    SLEEP_GAP_SECONDS = 15
-
     SCREENS = {
         "irc": IRCScreen,
         "settings": SettingsScreen,
@@ -122,6 +120,7 @@ class TextChat(App):
 
     async def on_mount(self) -> None:
         await create_table()
+        self.request_macos_notification_permission()
 
         self.channel_list = None
         # IRC prefixes are per-channel: the same nick may be in one channel but
@@ -136,9 +135,7 @@ class TextChat(App):
         self.unread_counts = {}
         self.notification_counts = {}
         self.active_server_id = None
-        self._last_awake_wall_time = time.time()
-        self._wake_reconnect_pending = False
-        self._wake_monitor_started = False
+        self._reconnect_pending = False
         self.action_list = [
             "/join",
             "/part",
@@ -615,44 +612,26 @@ class TextChat(App):
 
         self.push_screen(KickedScreen(channel, kicker, reason), handle_choice)
 
-    def _detect_wake(self) -> None:
-        """Reconnect after the event loop resumes from computer sleep."""
-        now = time.time()
-        elapsed = now - self._last_awake_wall_time
-        self._last_awake_wall_time = now
-
-        if elapsed < self.SLEEP_GAP_SECONDS:
-            return
-
-        self._request_reconnect("Reconnecting after wake…")
-
     def _request_reconnect(self, message: str) -> bool:
-        """Start one reconnect worker and make its reason visible to the user."""
+        """Start one reconnect worker after an attempted send has failed."""
         if (
-            self._wake_reconnect_pending
+            self._reconnect_pending
             or self.active_server_id is None
             or not hasattr(self, "irc_client")
         ):
             return False
 
-        self._wake_reconnect_pending = True
+        self._reconnect_pending = True
         self.notify(message, title="Textchat")
-        self.reconnect_after_wake(self.active_server_id)
+        self.reconnect_after_send_failure(self.active_server_id)
         return True
 
-    def _start_wake_monitor(self) -> None:
-        """Start one sleep-gap monitor for both first-run and later connects."""
-        self._last_awake_wall_time = time.time()
-        if not self._wake_monitor_started:
-            self.set_interval(5, self._detect_wake)
-            self._wake_monitor_started = True
-
-    @work(group="wake-reconnect", exclusive=True, exit_on_error=False)
-    async def reconnect_after_wake(self, server_id) -> None:
+    @work(group="send-failure-reconnect", exclusive=True, exit_on_error=False)
+    async def reconnect_after_send_failure(self, server_id) -> None:
         try:
             await self.connect_saved_server(server_id)
         finally:
-            self._wake_reconnect_pending = False
+            self._reconnect_pending = False
 
     async def _reset_connection_view(self) -> None:
         """Remove the previous server's tabs and sidebars before reconnecting."""
@@ -711,7 +690,6 @@ class TextChat(App):
 
         self.irc_client = self._make_irc_client(server, channels)
         self.irc_client.start_event_loop()
-        self._start_wake_monitor()
 
     async def _handle_chat_command(self, message) -> None:
         """Dispatch commands handled by Textchat itself."""
@@ -846,6 +824,20 @@ class TextChat(App):
     )
     async def send_macos_notification(self, title: str, message: str) -> None:
         await send_desktop_notification(title, message)
+
+    @work(
+        group="macos-notification-permission",
+        exclusive=True,
+        exit_on_error=False,
+    )
+    async def request_macos_notification_permission(self) -> None:
+        """Request native-notification permission while the chat is visible."""
+        if not await request_desktop_notification_permission():
+            self.notify(
+                "Enable notifications for Python in System Settings to receive IRC alerts.",
+                title="Notifications disabled",
+                severity="warning",
+            )
 
     def irc_message(
         self,
