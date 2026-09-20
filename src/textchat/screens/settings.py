@@ -2,6 +2,8 @@ from sqlalchemy.exc import IntegrityError
 from textchat.db.base import create_table
 from textual import on
 from textual.app import ComposeResult
+from textual.color import Color
+from textual.color import ColorParseError
 from textual.containers import Horizontal
 from textual.containers import Vertical
 from textual.screen import Screen
@@ -65,6 +67,15 @@ class SettingsScreen(Screen):
             yield Label("Password (optional)", classes="settings-label")
             yield Password(placeholder="Server or ZNC password", password=True)
             yield Checkbox("SASL", False, id="sasl_login")
+            yield Label("Appearance", classes="settings-title")
+            yield Label(
+                "Sidebar color accepts a CSS color name or hex value, for example "
+                "green or #00aa00.",
+                classes="settings-help",
+            )
+            yield Label("Sidebar text color", classes="settings-label")
+            yield Input(value="green", id="sidebar_color")
+            yield Button("Save appearance", id="save-appearance")
             yield Label("Spell check", classes="settings-title")
             yield Label(
                 "Underlines appear after you pause typing. F2 accepts a suggestion "
@@ -81,6 +92,7 @@ class SettingsScreen(Screen):
 
     async def on_mount(self):
         await create_table()
+        await self._load_appearance_settings()
         await self._load_spellcheck_settings()
         active_server = await self.channel_ops.get_server_info()
         await self._refresh_server_selector(
@@ -115,6 +127,26 @@ class SettingsScreen(Screen):
         self.query_one("#spellcheck_suggestion_limit", Input).value = str(
             settings["suggestion_limit"]
         )
+
+    async def _load_appearance_settings(self):
+        color = await self.channel_ops.get_sidebar_color()
+        self.query_one("#sidebar_color", Input).value = color
+
+    async def _save_appearance_settings(self):
+        color = self.query_one("#sidebar_color", Input).value.strip()
+        if not color:
+            self.notify("Sidebar color cannot be empty.")
+            return None
+        try:
+            Color.parse(color)
+        except ColorParseError:
+            self.notify("Use a CSS color name or hex value, such as green or #00aa00.")
+            return None
+
+        color = await self.channel_ops.save_sidebar_color(color)
+        self.app.sidebar_color = color
+        self.app.apply_sidebar_color()
+        return color
 
     async def _save_spellcheck_settings(self):
         enabled = self.query_one("#spellcheck_enabled", Checkbox).value
@@ -223,6 +255,11 @@ class SettingsScreen(Screen):
         return server
 
     async def on_button_pressed(self, event: Button.Pressed):
+        if event.button.id == "save-appearance":
+            color = await self._save_appearance_settings()
+            if color is not None:
+                self.notify("Sidebar color saved.")
+            return
         if event.button.id == "save-spellcheck":
             settings = await self._save_spellcheck_settings()
             if settings is not None:

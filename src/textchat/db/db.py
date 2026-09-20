@@ -9,6 +9,23 @@ from .base import Session
 
 
 class ChannelOperations:
+    async def get_sidebar_color(self):
+        """Return the globally configured sidebar text color."""
+        async with Session() as session:
+            setting = await session.get(AppSetting, "sidebar_color")
+        return setting.value if setting is not None else "green"
+
+    async def save_sidebar_color(self, color):
+        """Persist the sidebar text color shared by all server profiles."""
+        async with Session() as session:
+            setting = await session.get(AppSetting, "sidebar_color")
+            if setting is None:
+                session.add(AppSetting(key="sidebar_color", value=color))
+            else:
+                setting.value = color
+            await session.commit()
+        return color
+
     async def get_spellcheck_settings(self):
         defaults = {
             "enabled": True,

@@ -67,11 +67,6 @@ Toast {
     min-width: 16;
     max-width: 30;
     height: 100%;
-}
-
-#sidebar {
-    width: 1fr;
-    height: 1fr;
     color: green;
 }
 

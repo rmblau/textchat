@@ -123,6 +123,7 @@ class TextChat(App):
         self.request_macos_notification_permission()
         self.channel_ops = ChannelOperations()
         self.spellcheck_settings = await self.channel_ops.get_spellcheck_settings()
+        self.sidebar_color = await self.channel_ops.get_sidebar_color()
 
         self.channel_list = None
         # IRC prefixes are per-channel: the same nick may be in one channel but
@@ -149,6 +150,7 @@ class TextChat(App):
             "/me",
         ]
         self.irc_screen = self.get_screen("irc", IRCScreen)
+        self.apply_sidebar_color()
 
         servers = await self.channel_ops.get_servers()
         if not servers:
@@ -156,6 +158,16 @@ class TextChat(App):
             return
 
         await self.show_network_picker()
+
+    def apply_sidebar_color(self):
+        """Apply the saved color to both live sidebar trees."""
+        try:
+            irc_screen = self.get_screen("irc", IRCScreen)
+            for tree_type in (ChannelTree, UserTree):
+                irc_screen.query_one(tree_type).styles.color = self.sidebar_color
+        except NoMatches:
+            # The settings screen can be displayed before the IRC screen mounts.
+            pass
 
     @on(ChatInput.Changed)
     def save_active_tab_draft(self, event: ChatInput.Changed) -> None:
@@ -407,39 +419,6 @@ class TextChat(App):
         tabbed_content = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
         if tabbed_content.active_pane is not pane:
             self._set_tab_unread(pane, True, notification=notification)
-
-    def update_topic_bar(self, channel: str | None) -> None:
-        """Render the active channel's cached IRC topic below the sidebar."""
-        try:
-            topic_bar = self.get_screen("irc", IRCScreen).query_one(
-                "#topic-bar", Static
-            )
-        except NoMatches:
-            return
-
-        if not channel or channel[0] not in "#&!+":
-            topic_bar.update("No channel selected")
-            return
-
-        topic = self.channel_topics.get(channel.casefold(), "")
-        topic_bar.update(f"({channel}) {topic or 'No topic set'}")
-
-    @work(group="channel-topics", exclusive=False, exit_on_error=False)
-    async def update_channel_topic(self, channel: str, topic: str) -> None:
-        """Cache a topic received from IRC and refresh it if it is visible."""
-        self.channel_topics[channel.casefold()] = topic
-
-        try:
-            tabbed = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
-        except NoMatches:
-            return
-        active_pane = tabbed.active_pane
-        if (
-            active_pane is not None
-            and active_pane.name is not None
-            and active_pane.name.casefold() == channel.casefold()
-        ):
-            self.update_topic_bar(channel)
 
     def update_topic_bar(self, channel: str | None) -> None:
         """Render the active channel's cached IRC topic below the sidebar."""
