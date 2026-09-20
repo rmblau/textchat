@@ -395,28 +395,26 @@ class IRCApp(SimpleIRCClient):
                 classes=None,
             )
 
-    def on_ctcp(self, connection, event):
+    def on_action(self, connection, event):
+        """Display CTCP ACTION messages (the IRC representation of /me)."""
         sender = event.source.nick
-        message = event.arguments[1]
-        channel = event.target
+        action = event.arguments[0]
+        target = event.target
         now = datetime.now()
-        classes = "italics"
+        timestamp = f"{now.hour}:{now.minute:02d}"
 
-        if now.minute <= 9:
-            self.app.handle_irc_message(
-                f"{now.hour}:0{now.minute}",
-                channel,
+        if target and target[0] in "#&!+":
+            self.app.handle_irc_action(
+                timestamp,
+                target,
                 sender,
-                message,
-                classes,
+                action,
             )
         else:
-            self.app.handle_irc_message(
-                f"{now.hour}:{now.minute}",
-                channel,
+            self.app.handle_private_action(
+                timestamp,
                 sender,
-                message,
-                classes,
+                action,
             )
 
     def on_namreply(self, connection, event):
@@ -482,7 +480,80 @@ class IRCApp(SimpleIRCClient):
             )
 
     def on_part(self, connection, event):
-        self._remove_user_from_channel(event.target, event.source.nick)
+        nickname = event.source.nick
+        if self._nickname_key(nickname) == self._nickname_key(self.nickname):
+            return
+
+        reason = event.arguments[0] if event.arguments else ""
+        message = "has left"
+        if reason:
+            message += f" — {reason}"
+
+        self._remove_user_from_channel(event.target, nickname)
+        self.app.handle_irc_message(
+            datetime.now().strftime("%H:%M"),
+            event.target,
+            nickname,
+            message,
+            "italics",
+            mark_unread=False,
+        )
+
+    def on_currenttopic(self, connection, event):
+        """Receive the topic sent by the server after joining a channel."""
+        if len(event.arguments) >= 2:
+            channel, topic = event.arguments[:2]
+            self.app.update_channel_topic(channel, topic)
+
+    def on_notopic(self, connection, event):
+        """Record that a joined channel has no topic."""
+        if event.arguments:
+            self.app.update_channel_topic(event.arguments[0], "")
+
+    def on_topic(self, connection, event):
+        """Receive a topic change announced by a channel member."""
+        if event.target and event.arguments:
+            self.app.update_channel_topic(event.target, event.arguments[0])
+
+    def on_nick(self, connection, event):
+        old_nickname = event.source.nick
+        new_nickname = event.target
+
+        if not old_nickname or not new_nickname:
+            return
+
+        for channel_key, users in tuple(self.channel_users.items()):
+            renamed = set()
+            changed = False
+
+            for member in users:
+                if self._nickname_key(member) == self._nickname_key(old_nickname):
+                    # Keep status prefixes such as @, +, %, and ~.
+                    prefix_length = len(member) - len(member.lstrip("@+%&~"))
+                    renamed.add(member[:prefix_length] + new_nickname)
+                    changed = True
+                else:
+                    renamed.add(member)
+
+            if not changed:
+                continue
+
+            self.channel_users[channel_key] = renamed
+            channel = self.channel_names[channel_key]
+            self._publish_channel_users(channel)
+
+            self.app.handle_irc_message(
+                datetime.now().strftime("%H:%M"),
+                channel,
+                old_nickname,
+                f"is now known as {new_nickname}",
+                "italics",
+                mark_unread=False,
+            )
+
+        # Keep Textchat's locally stored nickname current if this was us.
+        if self._nickname_key(old_nickname) == self._nickname_key(self.nickname):
+            self.nickname = new_nickname
 
     def on_currenttopic(self, connection, event):
         """Receive the topic sent by the server after joining a channel."""
@@ -566,9 +637,31 @@ class IRCApp(SimpleIRCClient):
 
     def on_quit(self, connection, event):
         nickname = event.source.nick
+        if self._nickname_key(nickname) == self._nickname_key(self.nickname):
+            return
+
+        reason = event.arguments[0] if event.arguments else ""
+        message = "has quit"
+        if reason:
+            message += f" — {reason}"
+
         for channel_key, channel in tuple(self.channel_names.items()):
-            if channel_key in self.channel_users:
-                self._remove_user_from_channel(channel, nickname)
+            users = self.channel_users.get(channel_key, set())
+            if not any(
+                self._nickname_key(user) == self._nickname_key(nickname)
+                for user in users
+            ):
+                continue
+
+            self._remove_user_from_channel(channel, nickname)
+            self.app.handle_irc_message(
+                datetime.now().strftime("%H:%M"),
+                channel,
+                nickname,
+                message,
+                "italics",
+                mark_unread=False,
+            )
 
     def on_disconnect(self, connection, event):
         self.stop()

@@ -22,6 +22,15 @@ class Base(DeclarativeBase):
     pass
 
 
+class AppSetting(Base):
+    """One global preference shared by every saved IRC profile."""
+
+    __tablename__ = "app_settings"
+
+    key = Column(String, primary_key=True)
+    value = Column(String, nullable=False)
+
+
 class Channels(Base):
     __tablename__ = "channels"
 

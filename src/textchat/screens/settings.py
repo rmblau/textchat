@@ -65,10 +65,23 @@ class SettingsScreen(Screen):
             yield Label("Password (optional)", classes="settings-label")
             yield Password(placeholder="Server or ZNC password", password=True)
             yield Checkbox("SASL", False, id="sasl_login")
+            yield Label("Spell check", classes="settings-title")
+            yield Label(
+                "Underlines appear after you pause typing. F2 accepts a suggestion "
+                "and cycles through the configured alternatives.",
+                classes="settings-help",
+            )
+            yield Checkbox("Enable spell check", True, id="spellcheck_enabled")
+            yield Label("Underline delay (milliseconds)", classes="settings-label")
+            yield Input(value="500", type="integer", id="spellcheck_delay_ms")
+            yield Label("Maximum F2 suggestions", classes="settings-label")
+            yield Input(value="3", type="integer", id="spellcheck_suggestion_limit")
+            yield Button("Save spell check", id="save-spellcheck")
         yield Footer()
 
     async def on_mount(self):
         await create_table()
+        await self._load_spellcheck_settings()
         active_server = await self.channel_ops.get_server_info()
         await self._refresh_server_selector(
             active_server.id if active_server is not None else None
@@ -94,6 +107,39 @@ class SettingsScreen(Screen):
         if selected_server_id is not None:
             selector.value = selected_server_id
         self._loading_profile = False
+
+    async def _load_spellcheck_settings(self):
+        settings = await self.channel_ops.get_spellcheck_settings()
+        self.query_one("#spellcheck_enabled", Checkbox).value = settings["enabled"]
+        self.query_one("#spellcheck_delay_ms", Input).value = str(settings["delay_ms"])
+        self.query_one("#spellcheck_suggestion_limit", Input).value = str(
+            settings["suggestion_limit"]
+        )
+
+    async def _save_spellcheck_settings(self):
+        enabled = self.query_one("#spellcheck_enabled", Checkbox).value
+        delay_value = self.query_one("#spellcheck_delay_ms", Input).value
+        limit_value = self.query_one("#spellcheck_suggestion_limit", Input).value
+        try:
+            delay_ms = int(delay_value)
+            suggestion_limit = int(limit_value)
+        except ValueError:
+            self.notify("Spellcheck delay and suggestion count must be numbers.")
+            return None
+        if not 100 <= delay_ms <= 5000:
+            self.notify("Spellcheck delay must be between 100 and 5000 milliseconds.")
+            return None
+        if not 1 <= suggestion_limit <= 10:
+            self.notify("Spellcheck suggestions must be between 1 and 10.")
+            return None
+
+        settings = await self.channel_ops.save_spellcheck_settings(
+            enabled,
+            delay_ms,
+            suggestion_limit,
+        )
+        self.app.spellcheck_settings = settings
+        return settings
 
     async def _load_server(self, server):
         self._loading_profile = True
@@ -177,6 +223,11 @@ class SettingsScreen(Screen):
         return server
 
     async def on_button_pressed(self, event: Button.Pressed):
+        if event.button.id == "save-spellcheck":
+            settings = await self._save_spellcheck_settings()
+            if settings is not None:
+                self.notify("Spellcheck settings saved.")
+            return
         if event.button.id == "new-server":
             self.query_one("#server-selector", Select).value = Select.NULL
             self._clear_form()

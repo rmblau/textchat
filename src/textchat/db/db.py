@@ -2,12 +2,62 @@ from sqlalchemy import delete
 from sqlalchemy import select
 from sqlalchemy import update
 
+from .base import AppSetting
 from .base import Channels
 from .base import ServerInfo
 from .base import Session
 
 
 class ChannelOperations:
+    async def get_spellcheck_settings(self):
+        defaults = {
+            "enabled": True,
+            "delay_ms": 500,
+            "suggestion_limit": 3,
+        }
+        async with Session() as session:
+            result = await session.execute(
+                select(AppSetting).where(
+                    AppSetting.key.in_(
+                        [
+                            "spellcheck_enabled",
+                            "spellcheck_delay_ms",
+                            "spellcheck_suggestion_limit",
+                        ]
+                    )
+                )
+            )
+        values = {setting.key: setting.value for setting in result.scalars()}
+        try:
+            defaults["enabled"] = values.get("spellcheck_enabled", "true") == "true"
+            defaults["delay_ms"] = int(values.get("spellcheck_delay_ms", 500))
+            defaults["suggestion_limit"] = int(
+                values.get("spellcheck_suggestion_limit", 3)
+            )
+        except ValueError:
+            pass
+        return defaults
+
+    async def save_spellcheck_settings(self, enabled, delay_ms, suggestion_limit):
+        values = {
+            "spellcheck_enabled": str(bool(enabled)).lower(),
+            "spellcheck_delay_ms": str(delay_ms),
+            "spellcheck_suggestion_limit": str(suggestion_limit),
+        }
+        async with Session() as session:
+            for key, value in values.items():
+                setting = await session.get(AppSetting, key)
+                if setting is None:
+                    session.add(AppSetting(key=key, value=value))
+                else:
+                    setting.value = value
+            await session.commit()
+        return {
+            "enabled": bool(enabled),
+            "delay_ms": delay_ms,
+            "suggestion_limit": suggestion_limit,
+        }
+
     async def get_channels(self, server_id=None):
         async with Session() as session:
             statement = select(Channels).order_by(Channels.id)

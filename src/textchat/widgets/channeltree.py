@@ -3,9 +3,9 @@ from textual.widgets import Tree
 
 class ChannelTree(Tree):
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
-        """Show WHOIS details when a member is selected in the channel tree."""
+        """Select the channel and show its members in the roster sidebar."""
         data = event.node.data or {}
-        if data.get("kind") != "user":
+        if data.get("kind") != "channel":
             return
 
-        self.app.request_whois(data["id"])
+        self.app.select_sidebar_channel(data["id"])
