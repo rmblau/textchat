@@ -555,6 +555,62 @@ class IRCApp(SimpleIRCClient):
         if self._nickname_key(old_nickname) == self._nickname_key(self.nickname):
             self.nickname = new_nickname
 
+    def on_currenttopic(self, connection, event):
+        """Receive the topic sent by the server after joining a channel."""
+        if len(event.arguments) >= 2:
+            channel, topic = event.arguments[:2]
+            self.app.update_channel_topic(channel, topic)
+
+    def on_notopic(self, connection, event):
+        """Record that a joined channel has no topic."""
+        if event.arguments:
+            self.app.update_channel_topic(event.arguments[0], "")
+
+    def on_topic(self, connection, event):
+        """Receive a topic change announced by a channel member."""
+        if event.target and event.arguments:
+            self.app.update_channel_topic(event.target, event.arguments[0])
+
+    def on_nick(self, connection, event):
+        old_nickname = event.source.nick
+        new_nickname = event.target
+
+        if not old_nickname or not new_nickname:
+            return
+
+        for channel_key, users in tuple(self.channel_users.items()):
+            renamed = set()
+            changed = False
+
+            for member in users:
+                if self._nickname_key(member) == self._nickname_key(old_nickname):
+                    # Keep status prefixes such as @, +, %, and ~.
+                    prefix_length = len(member) - len(member.lstrip("@+%&~"))
+                    renamed.add(member[:prefix_length] + new_nickname)
+                    changed = True
+                else:
+                    renamed.add(member)
+
+            if not changed:
+                continue
+
+            self.channel_users[channel_key] = renamed
+            channel = self.channel_names[channel_key]
+            self._publish_channel_users(channel)
+
+            self.app.handle_irc_message(
+                datetime.now().strftime("%H:%M"),
+                channel,
+                old_nickname,
+                f"is now known as {new_nickname}",
+                "italics",
+                mark_unread=False,
+            )
+
+        # Keep Textchat's locally stored nickname current if this was us.
+        if self._nickname_key(old_nickname) == self._nickname_key(self.nickname):
+            self.nickname = new_nickname
+
     def on_kick(self, connection, event):
         """Show a kick in the channel and update its member list."""
         if not event.arguments:

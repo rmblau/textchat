@@ -441,6 +441,39 @@ class TextChat(App):
         ):
             self.update_topic_bar(channel)
 
+    def update_topic_bar(self, channel: str | None) -> None:
+        """Render the active channel's cached IRC topic below the sidebar."""
+        try:
+            topic_bar = self.get_screen("irc", IRCScreen).query_one(
+                "#topic-bar", Static
+            )
+        except NoMatches:
+            return
+
+        if not channel or channel[0] not in "#&!+":
+            topic_bar.update("No channel selected")
+            return
+
+        topic = self.channel_topics.get(channel.casefold(), "")
+        topic_bar.update(f"({channel}) {topic or 'No topic set'}")
+
+    @work(group="channel-topics", exclusive=False, exit_on_error=False)
+    async def update_channel_topic(self, channel: str, topic: str) -> None:
+        """Cache a topic received from IRC and refresh it if it is visible."""
+        self.channel_topics[channel.casefold()] = topic
+
+        try:
+            tabbed = self.get_screen("irc", IRCScreen).query_one(TabbedContent)
+        except NoMatches:
+            return
+        active_pane = tabbed.active_pane
+        if (
+            active_pane is not None
+            and active_pane.name is not None
+            and active_pane.name.casefold() == channel.casefold()
+        ):
+            self.update_topic_bar(channel)
+
     @on(TabbedContent.TabActivated)
     def clear_active_tab_unread(self, event: TabbedContent.TabActivated) -> None:
         """Read a tab as soon as the user switches to it."""

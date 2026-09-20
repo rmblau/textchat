@@ -3,6 +3,7 @@ from textchat.widgets.input import ChatInput
 from textchat.widgets.usertree import UserTree
 from textual.app import ComposeResult
 from textual.containers import Horizontal
+from textual.containers import Vertical
 from textual.screen import Screen
 from textual.widgets import Collapsible
 from textual.widgets import Footer
