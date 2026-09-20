@@ -121,6 +121,8 @@ class TextChat(App):
     async def on_mount(self) -> None:
         await create_table()
         self.request_macos_notification_permission()
+        self.channel_ops = ChannelOperations()
+        self.spellcheck_settings = await self.channel_ops.get_spellcheck_settings()
 
         self.channel_list = None
         # IRC prefixes are per-channel: the same nick may be in one channel but
@@ -146,7 +148,6 @@ class TextChat(App):
             "/nick",
             "/me",
         ]
-        self.channel_ops = ChannelOperations()
         self.irc_screen = self.get_screen("irc", IRCScreen)
 
         servers = await self.channel_ops.get_servers()
@@ -1077,8 +1078,6 @@ def _macos_event_loop():
     appkit = util.find_library("AppKit")
     if appkit is None:
         raise RuntimeError("Unable to load macOS AppKit framework")
-
-    # Rubicon resolves NSEvent during import, so AppKit must be loaded first.
     cdll.LoadLibrary(appkit)
 
     from rubicon.objc.eventloop import RubiconEventLoop

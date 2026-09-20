@@ -28,3 +28,6 @@ git clone https://github.com/rmblau/textchat.git
 cd textchat
 python -m pip install -e .
 ```
+
+## Screenshots
+![My Image](assets/libera.png)
